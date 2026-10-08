@@ -227,5 +227,78 @@ test("find_nearby adaptively shrinks radius when exceededTransferLimit is true",
     }),
   );
   assert.equal(r.effective_radius_miles, 25);
-  assert.ok(r.notes.some((n: string) => n.includes("reduced to 25 miles")));
+  assert.equal(r.closest_guaranteed, true);
+  assert.ok(r.notes.some((n: string) => n.includes("25-mile circle")));
+});
+
+// Fake layer: one hospital every 0.2 miles due north. The service overflows
+// whenever more than 200 fall inside the circle, like a dense city would.
+function denseFetch(perMile: number) {
+  return (async (input: string | URL) => {
+    const url = String(input);
+    const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200 });
+    if (url.endsWith("?f=json")) return json(layerJson);
+    const u = new URL(url);
+    if (u.searchParams.get("returnDistinctValues")) return json({ features: [] });
+    const dist = Number(u.searchParams.get("distance") ?? 0);
+    const n = Math.floor(dist * perMile);
+    const all = Array.from({ length: n }, (_, i) => ({
+      attributes: { NAME: `H${i}` },
+      geometry: { x: -117.7, y: 34.1 + ((i + 1) / perMile) / 69 },
+    })).reverse(); // storage order: farthest first
+    return json({ exceededTransferLimit: n > 200, features: all.slice(0, 200) });
+  }) as typeof fetch;
+}
+
+test("dense area: shrinks to a circle that fits and still has enough results", async () => {
+  globalThis.fetch = denseFetch(20); // 2,000 within 100 miles
+  const r = body(
+    await (await connect()).callTool({
+      name: "find_nearby",
+      arguments: { dataset: "hospitals", latitude: 34.1, longitude: -117.7, radius_miles: 100, limit: 10 },
+    }),
+  );
+  assert.equal(r.closest_guaranteed, true);
+  assert.equal(r.results.length, 10);
+  assert.equal(r.results[0].attributes.NAME, "H0"); // the true nearest one
+});
+
+test("never returns fewer results than asked when more exist", async () => {
+  globalThis.fetch = denseFetch(20);
+  const r = body(
+    await (await connect()).callTool({
+      name: "find_nearby",
+      arguments: { dataset: "hospitals", latitude: 34.1, longitude: -117.7, radius_miles: 100, limit: 25 },
+    }),
+  );
+  assert.equal(r.results.length, 25);
+  assert.equal(r.results[0].attributes.NAME, "H0");
+});
+
+test("too dense to resolve: says the list is not guaranteed", async () => {
+  globalThis.fetch = denseFetch(100000);
+  const r = body(
+    await (await connect()).callTool({
+      name: "find_nearby",
+      arguments: { dataset: "hospitals", latitude: 34.1, longitude: -117.7, radius_miles: 10, limit: 10 },
+    }),
+  );
+  assert.equal(r.closest_guaranteed, false);
+  assert.ok(r.notes.some((n: string) => n.includes("nearer place may be missing")));
+});
+
+test("schema lists every value of a coded field", async () => {
+  const many = Array.from({ length: 55 }, (_, i) => ({ attributes: { TRAUMA: `V${String(i).padStart(2, "0")}` } }));
+  const prev = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL) => {
+    const url = String(input);
+    if (url.includes("returnDistinctValues=true") && url.includes("outFields=TRAUMA"))
+      return new Response(JSON.stringify({ features: many }), { status: 200 });
+    if (url.includes("returnDistinctValues=true")) return new Response(JSON.stringify({ features: [] }), { status: 200 });
+    return prev(input);
+  }) as typeof fetch;
+  const r = body(await (await connect()).callTool({ name: "get_dataset_schema", arguments: { dataset: "hospitals" } }));
+  const trauma = r.fields.find((f: any) => f.name === "TRAUMA");
+  assert.equal(trauma.examples.length, 55);
+  assert.equal(trauma.all_values, true);
 });

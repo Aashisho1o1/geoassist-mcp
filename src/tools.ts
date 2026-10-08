@@ -73,7 +73,9 @@ export function buildServer(): McpServer {
       title: "Find places near a hazard or a point",
       description:
         "Hospitals, schools, or cities within a radius of an EONET event or a lat/lon point, closest first, " +
-        "with an optional where filter (for example TRAUMA IN ('LEVEL I', 'LEVEL  I', 'I') or HELIPAD = 'Y'). " +
+        "with an optional where filter (for example HELIPAD = 'Y'). Coded fields such as TRAUMA are spelled many ways " +
+        "('LEVEL I', 'LEVEL  I', 'I', 'LEVEL I TRAUMA', ...): get_dataset_schema lists every value, so filter with " +
+        "IN (...) over all the spellings that match, not a single LIKE pattern. " +
         "Returns the exact query sent to ArcGIS so the person can see what was asked.",
       inputSchema: {
         dataset: z.enum(DATASET_IDS),
@@ -139,8 +141,11 @@ export function buildServer(): McpServer {
             ...(filteredOpen
               ? ["Filtered to open facilities (STATUS = 'OPEN') by default. To include closed facilities, set open_only: false or specify STATUS in the where clause."]
               : []),
-            ...(result.effective_radius_miles < args.radius_miles
-              ? [`Search radius was reduced to ${result.effective_radius_miles} miles to guarantee true closest proximity in a dense area (${result.matches_found}+ facilities).`]
+            ...(result.effective_radius_miles < args.radius_miles && result.closest_guaranteed
+              ? [`This area is dense, so the search used a ${result.effective_radius_miles}-mile circle: small enough to fetch every place inside it, which guarantees these are the closest ones.`]
+              : []),
+            ...(!result.closest_guaranteed
+              ? [`This area has more than 200 matches even within ${result.effective_radius_miles} miles, so these are the closest of a subset and a nearer place may be missing. Use a tighter filter or a smaller radius.`]
               : []),
             ...(!isInsideUS
               ? ["Center point is outside the US. The queried Living Atlas layers only cover US territory, so matches may be empty."]

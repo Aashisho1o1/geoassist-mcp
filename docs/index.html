@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Who's Near the Fire?</title>
+  <meta name="description" content="Pick an active US wildfire or storm and see the hospitals and schools closest to it, from live NASA EONET and Esri Living Atlas data." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='none' stroke='%23d9480f' stroke-width='3' stroke-dasharray='5 4'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23d9480f'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="https://js.arcgis.com/4.34/esri/themes/light/main.css" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://js.arcgis.com/4.34/init.js"></script>
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div class="layout">
+    <aside class="panel" aria-label="Controls and results">
+      <header class="intro">
+        <p class="kicker">GeoAssist · Hazard Proximity</p>
+        <h1>Who's near the fire?</h1>
+        <p class="lede">
+          When a wildfire or storm is moving, someone has to decide which hospitals to warn and which schools
+          to close or open as shelters. Pick a live event and see what's closest, with phone numbers.
+        </p>
+      </header>
+
+      <section class="step" aria-labelledby="step1">
+        <h2 id="step1"><span class="num">1</span> Choose a live hazard</h2>
+        <div class="seg" role="tablist" aria-label="Hazard type" id="categoryTabs">
+          <button role="tab" data-cat="wildfires" aria-selected="true">Wildfires</button>
+          <button role="tab" data-cat="severeStorms" aria-selected="false">Storms</button>
+          <button role="tab" data-cat="volcanoes" aria-selected="false">Volcanoes</button>
+          <button role="tab" data-cat="floods" aria-selected="false">Floods</button>
+        </div>
+        <ul class="hazards" id="hazardList" aria-live="polite"></ul>
+        <p class="hint">Or click anywhere on the map to search around that point.</p>
+      </section>
+
+      <section class="step" aria-labelledby="step2">
+        <h2 id="step2"><span class="num">2</span> What do you need nearby?</h2>
+        <div class="seg" role="tablist" aria-label="Dataset" id="datasetTabs">
+          <button role="tab" data-ds="hospitals" aria-selected="true">Hospitals</button>
+          <button role="tab" data-ds="schools" aria-selected="false">Schools</button>
+        </div>
+        <div class="chips" id="presetChips" role="group" aria-label="Filter"></div>
+        <label class="radius">
+          <span>Within <strong id="radiusOut">25</strong> miles</span>
+          <input type="range" id="radius" min="5" max="100" step="5" value="25" />
+        </label>
+        <details class="custom" id="customBox">
+          <summary>Write your own filter</summary>
+          <p class="small">
+            This is the same check the AI model's filters go through. Field names must exist in the live layer,
+            and anything that isn't a field or a basic SQL word is refused before it reaches ArcGIS.
+          </p>
+          <form id="customForm" class="custom-row">
+            <input id="customWhere" type="text" spellcheck="false" autocomplete="off"
+                   placeholder="BEDS >= 200 AND HELIPAD = 'Y'" aria-label="Custom filter" />
+            <button type="submit">Run</button>
+          </form>
+          <div class="try">
+            Try: <button type="button" class="link" data-try="TRAUMMA = 'LEVEL I'">a typo</button>
+            · <button type="button" class="link" data-try="NAME = 'x'; DROP TABLE hospitals">an injection</button>
+            · <button type="button" class="link" data-try="BEDS >= 300 AND HELIPAD = 'Y'">big hospitals with a helipad</button>
+          </div>
+        </details>
+      </section>
+
+      <section class="step results" aria-labelledby="step3">
+        <h2 id="step3"><span class="num">3</span> <span id="resultsTitle">Closest places</span></h2>
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+        <div id="dataCard"></div>
+        <ol class="places" id="placeList"></ol>
+        <p class="caveat" id="caveat"></p>
+        <details class="how" id="howBox">
+          <summary>How this answer was made</summary>
+          <div id="howBody"></div>
+        </details>
+      </section>
+
+      <footer class="about">
+        <details>
+          <summary>Why I built this</summary>
+          <p>
+            I started with a NASA EONET disaster monitor at Soka, then built GeoAssist, a plain-English front end
+            for ArcGIS Feature Services. In GeoAssist, when the model guessed a field name wrong, the map came back
+            empty without any error. In an emergency, an empty map can read as "there's no hospital nearby".
+          </p>
+          <p>
+            So this version never lets the model's guess run unchecked. Every filter is checked against the live
+            layer first, closed hospitals are left out by default, and every answer shows the exact query it ran.
+            The map you're using runs the same code as the
+            <a href="https://github.com/Aashisho1o1/geoassist-mcp">MCP server</a> that Claude Desktop or Cursor can call.
+          </p>
+        </details>
+        <details>
+          <summary>What this can't tell you</summary>
+          <ul>
+            <li>NASA EONET gives one point per event, not a fire perimeter or storm footprint.</li>
+            <li>Distances are straight-line miles, not driving distance or evacuation routes.</li>
+            <li>Hospital and school records are public snapshots, not live status or capacity.</li>
+            <li>US only. In an emergency, call 911.</li>
+          </ul>
+        </details>
+        <p class="links">
+          <a href="https://github.com/Aashisho1o1/geoassist-mcp">Source on GitHub</a> ·
+          Data: <a href="https://eonet.gsfc.nasa.gov/">NASA EONET</a>,
+          <a href="https://livingatlas.arcgis.com/">Esri Living Atlas</a>
+        </p>
+      </footer>
+    </aside>
+
+    <main class="map-wrap">
+      <div id="map" aria-label="Map of hazard and nearby places"></div>
+      <div class="legend" aria-hidden="true">
+        <span><i class="dot fire"></i>Active hazard</span>
+        <span><i class="dot place"></i>Nearby place, by rank</span>
+        <span><i class="ring"></i>Search radius</span>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

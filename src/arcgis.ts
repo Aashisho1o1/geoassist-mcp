@@ -5,6 +5,8 @@ export interface FieldInfo {
   type: string;
   alias?: string;
   examples: string[];
+  // True when examples is the complete list of values in the layer.
+  all_values?: boolean;
 }
 
 // Schemas are read once per process from the live layer, then reused.
@@ -23,6 +25,7 @@ async function getJson(url: string): Promise<any> {
 }
 
 const CATEGORICAL_FIELDS = new Set(["TRAUMA", "HELIPAD", "STATUS", "LEVEL_", "TYPE", "OWNER"]);
+const MAX_DISTINCT = 100;
 
 export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
   const cached = schemaCache.get(ds.id);
@@ -56,32 +59,37 @@ export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
     };
   });
 
-  // For low-cardinality/categorical fields, fetch distinct values so the model
-  // sees the real dictionary of values rather than missing values like 'LEVEL I'.
-  for (const f of fields) {
-    if (CATEGORICAL_FIELDS.has(f.name.toUpperCase())) {
-      try {
-        const distinct = await getJson(
-          `${ds.url}/query?${new URLSearchParams({
-            where: "1=1",
-            outFields: f.name,
-            returnDistinctValues: "true",
-            returnGeometry: "false",
-            resultRecordCount: "25",
-            f: "json",
-          })}`,
-        );
-        const vals = (distinct.features ?? [])
-          .map((feat: any) => feat.attributes?.[f.name])
-          .filter((v: unknown) => v !== null && v !== undefined && v !== "");
-        if (vals.length > 0) {
-          f.examples = vals.slice(0, 20).map(String);
+  // Coded fields like TRAUMA are messy in practice (about 55 spellings of
+  // trauma levels: 'LEVEL I', 'LEVEL  I', 'I', 'LEVEL I TRAUMA', ...). A sample
+  // misses most of them, so fetch the full list for these fields. The model
+  // can only write a filter that catches every Level I center if it sees them all.
+  await Promise.all(
+    fields
+      .filter((f) => CATEGORICAL_FIELDS.has(f.name.toUpperCase()))
+      .map(async (f) => {
+        try {
+          const distinct = await getJson(
+            `${ds.url}/query?${new URLSearchParams({
+              where: "1=1",
+              outFields: f.name,
+              returnDistinctValues: "true",
+              returnGeometry: "false",
+              f: "json",
+            })}`,
+          );
+          const vals: string[] = (distinct.features ?? [])
+            .map((feat: any) => feat.attributes?.[f.name])
+            .filter((v: unknown) => v !== null && v !== undefined && v !== "")
+            .map(String);
+          if (vals.length > 0) {
+            f.examples = [...new Set(vals)].sort().slice(0, MAX_DISTINCT);
+            f.all_values = vals.length <= MAX_DISTINCT;
+          }
+        } catch {
+          // keep the sampled values
         }
-      } catch {
-        // fall back to sampled values
-      }
-    }
-  }
+      }),
+  );
 
   schemaCache.set(ds.id, fields);
   return fields;
@@ -89,6 +97,8 @@ export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
 
 export interface NearbyResult {
   distance_miles: number;
+  latitude: number;
+  longitude: number;
   attributes: Record<string, unknown>;
 }
 
@@ -101,10 +111,13 @@ export interface NearbyQuery {
   limit: number;
 }
 
-// Feature services return matches in storage order, not by distance, so we
-// pull up to 200 inside the radius, sort by straight-line distance here, and
-// keep the closest ones.
+// Feature services return at most FETCH_CAP matches, in storage order rather
+// than by distance. If everything inside the circle fits, sorting here gives
+// the true closest places. If it doesn't fit (a big radius in a dense city),
+// the 200 we got are an arbitrary subset, so we search for a smaller radius
+// that both fits under the cap and still holds at least `limit` places.
 const FETCH_CAP = 200;
+const MAX_SHRINK_STEPS = 6;
 
 export async function findNearby(ds: Dataset, q: NearbyQuery) {
   const makeParams = (radius: number) => ({
@@ -121,50 +134,60 @@ export async function findNearby(ds: Dataset, q: NearbyQuery) {
     resultRecordCount: String(FETCH_CAP),
     f: "json",
   });
+  const run = async (radius: number) => {
+    const params = makeParams(radius);
+    const body = await getJson(`${ds.url}/query?${new URLSearchParams(params)}`);
+    return { radius, params, features: (body.features ?? []) as any[], exceeded: Boolean(body.exceededTransferLimit) };
+  };
 
-  let currentRadius = q.radiusMiles;
-  let params = makeParams(currentRadius);
-  let body = await getJson(`${ds.url}/query?${new URLSearchParams(params)}`);
-  let features = body.features ?? [];
-  let exceeded = Boolean(body.exceededTransferLimit);
+  let chosen = await run(q.radiusMiles);
 
-  // In dense metro areas where exceededTransferLimit is true, ArcGIS returns matches
-  // in arbitrary storage order. To guarantee the nearest facilities aren't missed,
-  // adaptively shrink the radius until all facilities inside the circle fit under FETCH_CAP.
-  let iterations = 0;
-  while (exceeded && currentRadius > 1.0 && iterations < 4) {
-    iterations++;
-    const nextRadius = round1(currentRadius / 2);
-    const nextParams = makeParams(nextRadius);
-    const nextBody = await getJson(`${ds.url}/query?${new URLSearchParams(nextParams)}`);
-    const nextFeatures = nextBody.features ?? [];
-    const nextExceeded = Boolean(nextBody.exceededTransferLimit);
-
-    if (nextFeatures.length >= q.limit || !nextExceeded) {
-      currentRadius = nextRadius;
-      params = nextParams;
-      body = nextBody;
-      features = nextFeatures;
-      exceeded = nextExceeded;
-      if (!exceeded) break;
-    } else {
-      break;
+  if (chosen.exceeded) {
+    // Binary search between a radius known to hold too few (lo) and one known
+    // to overflow the cap (hi).
+    let lo = 0;
+    let hi = q.radiusMiles;
+    let fallback = chosen;
+    let found = false;
+    for (let i = 0; i < MAX_SHRINK_STEPS; i++) {
+      const mid = round1((lo + hi) / 2);
+      if (mid <= lo || mid >= hi) break;
+      const r = await run(mid);
+      if (r.exceeded) {
+        hi = mid;
+        fallback = r; // smaller overflowing circle: still a subset, but a tighter one
+      } else if (r.features.length >= q.limit) {
+        chosen = r;
+        found = true;
+        break;
+      } else {
+        lo = mid;
+      }
     }
+    if (!found) chosen = fallback;
   }
 
-  const results: NearbyResult[] = features
-    .map((f: any) => ({
-      distance_miles: round1(milesBetween(q.latitude, q.longitude, f.geometry?.y, f.geometry?.x)),
+  // Sort on the exact distance and round only for display, so two places
+  // that both show as 0.1 mi still come back in the right order.
+  const results: NearbyResult[] = chosen.features
+    .map((f: any) => ({ miles: milesBetween(q.latitude, q.longitude, f.geometry?.y, f.geometry?.x), f }))
+    .filter((r: { miles: number }) => !Number.isNaN(r.miles))
+    .sort((a: { miles: number }, b: { miles: number }) => a.miles - b.miles)
+    .map(({ miles, f }: { miles: number; f: any }) => ({
+      distance_miles: round1(miles),
+      latitude: f.geometry.y,
+      longitude: f.geometry.x,
       attributes: f.attributes ?? {},
-    }))
-    .filter((r: NearbyResult) => !Number.isNaN(r.distance_miles))
-    .sort((a: NearbyResult, b: NearbyResult) => a.distance_miles - b.distance_miles);
+    }));
 
   return {
-    query_sent: { endpoint: `${ds.url}/query`, ...params },
+    query_sent: { endpoint: `${ds.url}/query`, ...chosen.params },
     matches_found: results.length,
-    more_beyond_cap: exceeded,
-    effective_radius_miles: currentRadius,
+    more_beyond_cap: chosen.exceeded,
+    // False only when even the smallest circle tried had more than FETCH_CAP
+    // places, so the list is the closest of a subset, not guaranteed closest.
+    closest_guaranteed: !chosen.exceeded,
+    effective_radius_miles: chosen.radius,
     results: results.slice(0, q.limit),
   };
 }

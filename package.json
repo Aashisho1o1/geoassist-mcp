@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:demo": "tsc && cp dist/datasets.js dist/where.js dist/arcgis.js dist/eonet.js docs/lib/",
     "prepare": "npm run build",
     "prestart": "npm run build",
     "start": "node dist/index.js",

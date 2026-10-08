@@ -73,7 +73,7 @@ npm run inspect
 
 - "What wildfires are active in the US right now?"
 - "For the newest fire in California, which hospitals with a trauma center are within 30 miles?"
-- "List public schools within 10 miles of that fire, biggest enrollment first."
+- "List public schools within 10 miles of that fire with enrollment over 1,000."
 - "Which hospitals near 34.1, -117.7 have a helipad?"
 
 ## Limits

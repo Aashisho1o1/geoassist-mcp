@@ -15,12 +15,14 @@ export function clearSchemaCache(): void {
 }
 
 async function getJson(url: string): Promise<any> {
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`ArcGIS returned HTTP ${res.status} for ${url.split("?")[0]}`);
   const body = await res.json();
   if (body?.error) throw new Error(`ArcGIS error: ${body.error.message ?? JSON.stringify(body.error)}`);
   return body;
 }
+
+const CATEGORICAL_FIELDS = new Set(["TRAUMA", "HELIPAD", "STATUS", "LEVEL_", "TYPE", "OWNER"]);
 
 export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
   const cached = schemaCache.get(ds.id);
@@ -54,6 +56,33 @@ export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
     };
   });
 
+  // For low-cardinality/categorical fields, fetch distinct values so the model
+  // sees the real dictionary of values rather than missing values like 'LEVEL I'.
+  for (const f of fields) {
+    if (CATEGORICAL_FIELDS.has(f.name.toUpperCase())) {
+      try {
+        const distinct = await getJson(
+          `${ds.url}/query?${new URLSearchParams({
+            where: "1=1",
+            outFields: f.name,
+            returnDistinctValues: "true",
+            returnGeometry: "false",
+            resultRecordCount: "25",
+            f: "json",
+          })}`,
+        );
+        const vals = (distinct.features ?? [])
+          .map((feat: any) => feat.attributes?.[f.name])
+          .filter((v: unknown) => v !== null && v !== undefined && v !== "");
+        if (vals.length > 0) {
+          f.examples = vals.slice(0, 20).map(String);
+        }
+      } catch {
+        // fall back to sampled values
+      }
+    }
+  }
+
   schemaCache.set(ds.id, fields);
   return fields;
 }
@@ -78,7 +107,7 @@ export interface NearbyQuery {
 const FETCH_CAP = 200;
 
 export async function findNearby(ds: Dataset, q: NearbyQuery) {
-  const params = {
+  const makeParams = (radius: number) => ({
     where: q.where,
     outFields: q.outFields.join(","),
     geometry: `${q.longitude},${q.latitude}`,
@@ -86,15 +115,44 @@ export async function findNearby(ds: Dataset, q: NearbyQuery) {
     inSR: "4326",
     outSR: "4326",
     spatialRel: "esriSpatialRelIntersects",
-    distance: String(q.radiusMiles),
+    distance: String(radius),
     units: "esriSRUnit_StatuteMile",
     returnGeometry: "true",
     resultRecordCount: String(FETCH_CAP),
     f: "json",
-  };
-  const body = await getJson(`${ds.url}/query?${new URLSearchParams(params)}`);
+  });
 
-  const results: NearbyResult[] = (body.features ?? [])
+  let currentRadius = q.radiusMiles;
+  let params = makeParams(currentRadius);
+  let body = await getJson(`${ds.url}/query?${new URLSearchParams(params)}`);
+  let features = body.features ?? [];
+  let exceeded = Boolean(body.exceededTransferLimit);
+
+  // In dense metro areas where exceededTransferLimit is true, ArcGIS returns matches
+  // in arbitrary storage order. To guarantee the nearest facilities aren't missed,
+  // adaptively shrink the radius until all facilities inside the circle fit under FETCH_CAP.
+  let iterations = 0;
+  while (exceeded && currentRadius > 1.0 && iterations < 4) {
+    iterations++;
+    const nextRadius = round1(currentRadius / 2);
+    const nextParams = makeParams(nextRadius);
+    const nextBody = await getJson(`${ds.url}/query?${new URLSearchParams(nextParams)}`);
+    const nextFeatures = nextBody.features ?? [];
+    const nextExceeded = Boolean(nextBody.exceededTransferLimit);
+
+    if (nextFeatures.length >= q.limit || !nextExceeded) {
+      currentRadius = nextRadius;
+      params = nextParams;
+      body = nextBody;
+      features = nextFeatures;
+      exceeded = nextExceeded;
+      if (!exceeded) break;
+    } else {
+      break;
+    }
+  }
+
+  const results: NearbyResult[] = features
     .map((f: any) => ({
       distance_miles: round1(milesBetween(q.latitude, q.longitude, f.geometry?.y, f.geometry?.x)),
       attributes: f.attributes ?? {},
@@ -105,7 +163,8 @@ export async function findNearby(ds: Dataset, q: NearbyQuery) {
   return {
     query_sent: { endpoint: `${ds.url}/query`, ...params },
     matches_found: results.length,
-    more_beyond_cap: Boolean(body.exceededTransferLimit),
+    more_beyond_cap: exceeded,
+    effective_radius_miles: currentRadius,
     results: results.slice(0, q.limit),
   };
 }

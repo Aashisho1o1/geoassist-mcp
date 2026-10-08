@@ -4,7 +4,7 @@
 // doesn't recognize is rejected with a message the model can act on, so a bad
 // guess turns into a corrected retry instead of a silent empty result.
 
-const KEYWORDS = new Set(["AND", "OR", "NOT", "LIKE", "IN", "IS", "NULL", "BETWEEN"]);
+const KEYWORDS = new Set(["AND", "OR", "NOT", "LIKE", "IN", "IS", "NULL", "BETWEEN", "DATE", "TIMESTAMP"]);
 const FUNCTIONS = new Set(["UPPER", "LOWER"]);
 const MAX_LENGTH = 500;
 

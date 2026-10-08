@@ -94,9 +94,19 @@ test("find_nearby resolves an event, sorts by distance, and shows the query", as
   );
   assert.equal(r.results[0].attributes.NAME, "Close Community");
   assert.ok(r.results[0].distance_miles < r.results[1].distance_miles);
-  assert.equal(r.query_sent.where, "TRAUMA LIKE 'LEVEL%'"); // canonical spelling
+  assert.equal(r.query_sent.where, "(TRAUMA LIKE 'LEVEL%') AND STATUS = 'OPEN'"); // canonical spelling and open-only filter
   assert.equal(r.query_sent.distance, "50");
   assert.match(r.query_sent.outFields, /TELEPHONE/); // contact fields always included
+});
+
+test("find_nearby respects open_only: false", async () => {
+  const r = body(
+    await (await connect()).callTool({
+      name: "find_nearby",
+      arguments: { dataset: "hospitals", event_id: "EONET_1001", where: "trauma like 'LEVEL%'", open_only: false, radius_miles: 50 },
+    }),
+  );
+  assert.equal(r.query_sent.where, "TRAUMA LIKE 'LEVEL%'");
 });
 
 test("find_nearby rejects an unknown field with a useful hint", async () => {
@@ -123,7 +133,7 @@ test("radius above the cap is refused by the schema", async () => {
 });
 
 test("where gate", () => {
-  const f = ["NAME", "BEDS", "STATE"];
+  const f = ["NAME", "BEDS", "STATE", "VAL_DATE"];
   assert.deepEqual(checkWhere("beds > 100 and state in ('CA','NV')", f), {
     ok: true,
     where: "BEDS > 100 AND STATE IN ('CA','NV')",
@@ -135,11 +145,18 @@ test("where gate", () => {
   assert.equal(checkWhere("(BEDS > 1", f).ok, false);
   assert.equal(checkWhere("NAME = 'O''Brien'", f).ok, true);
   assert.equal(checkWhere("UPPER(NAME) LIKE '%MERCY%'", f).ok, true);
+  assert.equal(checkWhere("VAL_DATE >= DATE '2024-01-01'", f).ok, true);
 });
 
 test("polygon events use the average of the outer ring", () => {
-  const p = latestPoint([{ type: "Polygon", date: "d", coordinates: [[[-118, 34], [-116, 34], [-116, 36], [-118, 36]]] }]);
-  assert.deepEqual(p, { lon: -117, lat: 35, date: "d" });
+  // Open ring test
+  const pOpen = latestPoint([{ type: "Polygon", date: "d", coordinates: [[[-118, 34], [-116, 34], [-116, 36], [-118, 36]]] }]);
+  assert.deepEqual(pOpen, { lon: -117, lat: 35, date: "d" });
+
+  // Closed GeoJSON ring (closing coordinate duplicated at end)
+  const pClosed = latestPoint([{ type: "Polygon", date: "d", coordinates: [[[-118, 34], [-116, 34], [-116, 36], [-118, 36], [-118, 34]]] }]);
+  assert.deepEqual(pClosed, { lon: -117, lat: 35, date: "d" });
+
   assert.equal(inUS(35, -117), true);
   assert.equal(inUS(-33, 150), false);
   // Western Aleutians (-176 deg lon) included
@@ -171,4 +188,44 @@ test("find_nearby provides note when center point is outside US", async () => {
     }),
   );
   assert.ok(r.notes.some((n: string) => n.includes("outside the US")));
+});
+
+test("find_nearby adaptively shrinks radius when exceededTransferLimit is true", async () => {
+  globalThis.fetch = (async (input: string | URL) => {
+    const url = String(input);
+    const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200 });
+    if (url.endsWith("?f=json")) return json(layerJson);
+    if (url.includes("/query?")) {
+      const u = new URL(url);
+      const dist = Number(u.searchParams.get("distance"));
+      if (dist >= 50) {
+        // High density: exceeded transfer limit
+        return json({
+          exceededTransferLimit: true,
+          features: Array.from({ length: 20 }, (_, i) => ({
+            attributes: { NAME: `Hospital ${i}` },
+            geometry: { x: -117.7, y: 34.1 + i * 0.01 },
+          })),
+        });
+      }
+      // Shrunk radius fits under cap
+      return json({
+        exceededTransferLimit: false,
+        features: Array.from({ length: 15 }, (_, i) => ({
+          attributes: { NAME: `Inner Hospital ${i}` },
+          geometry: { x: -117.7, y: 34.1 + i * 0.005 },
+        })),
+      });
+    }
+    return new Response("not found", { status: 404 });
+  }) as typeof fetch;
+
+  const r = body(
+    await (await connect()).callTool({
+      name: "find_nearby",
+      arguments: { dataset: "hospitals", latitude: 34.1, longitude: -117.7, radius_miles: 50, limit: 10 },
+    }),
+  );
+  assert.equal(r.effective_radius_miles, 25);
+  assert.ok(r.notes.some((n: string) => n.includes("reduced to 25 miles")));
 });

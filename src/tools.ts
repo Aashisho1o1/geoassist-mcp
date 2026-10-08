@@ -73,8 +73,8 @@ export function buildServer(): McpServer {
       title: "Find places near a hazard or a point",
       description:
         "Hospitals, schools, or cities within a radius of an EONET event or a lat/lon point, closest first, " +
-        "with an optional where filter (for example TRAUMA LIKE 'LEVEL I%'). Returns the exact query sent " +
-        "to ArcGIS so the person can see what was asked.",
+        "with an optional where filter (for example TRAUMA IN ('LEVEL I', 'LEVEL  I', 'I') or HELIPAD = 'Y'). " +
+        "Returns the exact query sent to ArcGIS so the person can see what was asked.",
       inputSchema: {
         dataset: z.enum(DATASET_IDS),
         event_id: z.string().optional().describe("An id from list_active_hazards. Use this or latitude/longitude."),
@@ -82,6 +82,7 @@ export function buildServer(): McpServer {
         longitude: z.number().min(-180).max(180).optional(),
         radius_miles: z.number().positive().max(MAX_RADIUS).default(25),
         where: z.string().optional().describe("Optional SQL-style filter using only fields from get_dataset_schema."),
+        open_only: z.boolean().default(true).describe("If true (default), automatically filters out closed facilities when supported by the dataset."),
         out_fields: z.array(z.string()).optional().describe("Extra fields to return. Name and contact fields are always included."),
         limit: z.number().int().min(1).max(MAX_LIMIT).default(10),
       },
@@ -108,9 +109,17 @@ export function buildServer(): McpServer {
         const fields = checkFields(args.out_fields, names, ds.contactFields);
         if (!fields.ok) return fail(fields.error);
 
-        // 3. Run it.
+        // 3. Filter open facilities by default for emergency safety (e.g. hospitals).
+        let effectiveWhere = where.where;
+        let filteredOpen = false;
+        if (args.open_only && ds.id === "hospitals" && !effectiveWhere.toUpperCase().includes("STATUS")) {
+          filteredOpen = true;
+          effectiveWhere = effectiveWhere === "1=1" ? "STATUS = 'OPEN'" : `(${effectiveWhere}) AND STATUS = 'OPEN'`;
+        }
+
+        // 4. Run it.
         const result = await findNearby(ds, {
-          where: where.where,
+          where: effectiveWhere,
           outFields: fields.list,
           latitude: center.latitude,
           longitude: center.longitude,
@@ -127,6 +136,12 @@ export function buildServer(): McpServer {
           notes: [
             ds.caveat,
             "Distances are straight-line miles, not driving distance.",
+            ...(filteredOpen
+              ? ["Filtered to open facilities (STATUS = 'OPEN') by default. To include closed facilities, set open_only: false or specify STATUS in the where clause."]
+              : []),
+            ...(result.effective_radius_miles < args.radius_miles
+              ? [`Search radius was reduced to ${result.effective_radius_miles} miles to guarantee true closest proximity in a dense area (${result.matches_found}+ facilities).`]
+              : []),
             ...(!isInsideUS
               ? ["Center point is outside the US. The queried Living Atlas layers only cover US territory, so matches may be empty."]
               : []),

@@ -36,8 +36,13 @@ export function latestPoint(geometry: any[]): { lat: number; lon: number; date: 
   if (!g) return null;
   if (g.type === "Point") return { lon: g.coordinates[0], lat: g.coordinates[1], date: g.date };
   if (g.type === "Polygon") {
-    const ring: number[][] = g.coordinates?.[0] ?? [];
+    let ring: number[][] = g.coordinates?.[0] ?? [];
     if (!ring.length) return null;
+    // GeoJSON polygons close their linear rings by repeating the first vertex at the end.
+    // Drop the duplicate closing vertex if present so the centroid average isn't biased.
+    if (ring.length > 3 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) {
+      ring = ring.slice(0, -1);
+    }
     const lon = ring.reduce((s, p) => s + p[0], 0) / ring.length;
     const lat = ring.reduce((s, p) => s + p[1], 0) / ring.length;
     return { lon, lat, date: g.date };
@@ -47,7 +52,7 @@ export function latestPoint(geometry: any[]): { lat: number; lon: number; date: 
 
 export async function listHazards(category: HazardCategory, days: number): Promise<Hazard[]> {
   const url = `${EONET}?${new URLSearchParams({ status: "open", category, days: String(days) })}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`NASA EONET returned HTTP ${res.status}`);
   const body = await res.json();
 
@@ -70,7 +75,7 @@ export async function listHazards(category: HazardCategory, days: number): Promi
 
 export async function getHazard(id: string): Promise<Hazard> {
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(id)) throw new Error(`'${id}' is not a valid EONET event id.`);
-  const res = await fetch(`${EONET}/${id}`);
+  const res = await fetch(`${EONET}/${id}`, { signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`No EONET event found with id '${id}' (HTTP ${res.status}).`);
   const e = await res.json();
   const p = latestPoint(e.geometry);

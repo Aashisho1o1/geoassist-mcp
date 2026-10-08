@@ -1,0 +1,37 @@
+{
+  "name": "geoassist-hazard-proximity",
+  "version": "0.1.0",
+  "description": "MCP server: which hospitals and schools are near an active US wildfire or storm",
+  "main": "dist/index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prestart": "npm run build",
+    "start": "node dist/index.js",
+    "test": "node --import tsx --test test/*.test.ts",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "author": "Aashish Sunar",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "type": "module",
+  "bin": {
+    "geoassist-mcp": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

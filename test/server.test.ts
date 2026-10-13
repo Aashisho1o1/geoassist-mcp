@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildServer } from "../src/tools.js";
-import { checkWhere } from "../src/where.js";
+import { checkWhere, applyOpenOnly } from "../src/where.js";
 import { latestPoint, inUS } from "../src/eonet.js";
 import { clearSchemaCache } from "../src/arcgis.js";
 import { DATASETS } from "../src/datasets.js";
@@ -137,6 +137,7 @@ test("where gate", () => {
   assert.deepEqual(checkWhere("beds > 100 and state in ('CA','NV')", f), {
     ok: true,
     where: "BEDS > 100 AND STATE IN ('CA','NV')",
+    fields: ["BEDS", "STATE"],
   });
   assert.equal(checkWhere("", f).ok, true);
   assert.equal(checkWhere("NAME = 'x'; DROP TABLE t", f).ok, false);
@@ -146,6 +147,18 @@ test("where gate", () => {
   assert.equal(checkWhere("NAME = 'O''Brien'", f).ok, true);
   assert.equal(checkWhere("UPPER(NAME) LIKE '%MERCY%'", f).ok, true);
   assert.equal(checkWhere("VAL_DATE >= DATE '2024-01-01'", f).ok, true);
+  assert.equal(checkWhere("STATE IN ()", f).ok, false);
+  assert.equal(checkWhere("STATE IN ( )", f).ok, false);
+  assert.equal(checkWhere("NAME = 'IN ()'", f).ok, true);
+});
+
+test("open-only rule looks at fields, not text", () => {
+  const f = ["NAME", "STATUS"];
+  const gate = (w: string) => checkWhere(w, f) as { ok: true; where: string; fields: string[] };
+  assert.equal(applyOpenOnly("hospitals", gate("NAME LIKE '%STATUS%'")).where, "(NAME LIKE '%STATUS%') AND STATUS = 'OPEN'");
+  assert.deepEqual(applyOpenOnly("hospitals", gate("status = 'CLOSED'")), { where: "STATUS = 'CLOSED'", applied: false });
+  assert.deepEqual(applyOpenOnly("hospitals", gate("")), { where: "STATUS = 'OPEN'", applied: true });
+  assert.equal(applyOpenOnly("schools", gate("")).applied, false);
 });
 
 test("polygon events use the average of the outer ring", () => {

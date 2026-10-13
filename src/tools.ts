@@ -3,7 +3,7 @@ import { z } from "zod";
 import { DATASETS, DATASET_IDS } from "./datasets.js";
 import { getSchema, findNearby } from "./arcgis.js";
 import { listHazards, getHazard, inUS, HAZARD_CATEGORIES } from "./eonet.js";
-import { checkWhere, checkFields } from "./where.js";
+import { checkWhere, checkFields, applyOpenOnly } from "./where.js";
 
 const MAX_RADIUS = 100;
 const MAX_LIMIT = 25;
@@ -112,12 +112,9 @@ export function buildServer(): McpServer {
         if (!fields.ok) return fail(fields.error);
 
         // 3. Filter open facilities by default for emergency safety (e.g. hospitals).
-        let effectiveWhere = where.where;
-        let filteredOpen = false;
-        if (args.open_only && ds.id === "hospitals" && !effectiveWhere.toUpperCase().includes("STATUS")) {
-          filteredOpen = true;
-          effectiveWhere = effectiveWhere === "1=1" ? "STATUS = 'OPEN'" : `(${effectiveWhere}) AND STATUS = 'OPEN'`;
-        }
+        const open = args.open_only ? applyOpenOnly(ds.id, where) : { where: where.where, applied: false };
+        const effectiveWhere = open.where;
+        const filteredOpen = open.applied;
 
         // 4. Run it.
         const result = await findNearby(ds, {

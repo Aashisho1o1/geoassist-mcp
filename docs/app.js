@@ -6,7 +6,7 @@
 import { DATASETS } from "./lib/datasets.js";
 import { getSchema, findNearby } from "./lib/arcgis.js";
 import { listHazards, inUS } from "./lib/eonet.js";
-import { checkWhere, checkFields } from "./lib/where.js";
+import { checkWhere, checkFields, applyOpenOnly } from "./lib/where.js";
 
 const [EsriMap, MapView, Basemap, TileLayer, GraphicsLayer, Graphic, Circle, Point] = await new Promise((resolve) =>
   window.require(
@@ -382,6 +382,10 @@ async function run({ zoom = false } = {}) {
     const names = schema.map((f) => f.name);
 
     const preset = PRESETS[state.ds].find((p) => p.id === state.preset);
+    if (state.custom === null && state.preset === "level1" && levelISpellings(schema).length === 0) {
+      setStatus("Couldn't read the list of trauma-level values from the layer, so there's no reliable Level I filter right now. Try again in a moment.", "error");
+      return;
+    }
     const raw = state.custom ?? preset.where(schema);
 
     // 1. The gate. A refused filter never reaches ArcGIS.
@@ -400,12 +404,7 @@ async function run({ zoom = false } = {}) {
     if (!fields.ok) throw new Error(fields.error);
 
     // 2. Same open-only rule the MCP tool applies by default.
-    let where = gate.where;
-    let filteredOpen = false;
-    if (ds.id === "hospitals" && !where.toUpperCase().includes("STATUS")) {
-      filteredOpen = true;
-      where = where === "1=1" ? "STATUS = 'OPEN'" : `(${where}) AND STATUS = 'OPEN'`;
-    }
+    const { where, applied: filteredOpen } = applyOpenOnly(ds.id, gate);
 
     setStatus("Asking ArcGIS for places inside the circle…");
     const result = await findNearby(ds, {
@@ -546,8 +545,13 @@ async function count(ds, where, nearby) {
       units: "esriSRUnit_StatuteMile",
     });
   }
+  // A failed count must throw, not read as 0, or the card would report a
+  // confident but wrong number. ArcGIS often sends errors with HTTP 200.
   const res = await fetch(`${ds.url}/query?${new URLSearchParams(p)}`, { signal: AbortSignal.timeout(10_000) });
-  return (await res.json()).count ?? 0;
+  if (!res.ok) throw new Error(`ArcGIS returned HTTP ${res.status}`);
+  const body = await res.json();
+  if (body?.error || typeof body?.count !== "number") throw new Error("ArcGIS count failed");
+  return body.count;
 }
 
 async function renderLevelICard(ds, schema) {

@@ -9,7 +9,7 @@ const FUNCTIONS = new Set(["UPPER", "LOWER"]);
 const MAX_LENGTH = 500;
 
 export type WhereCheck =
-  | { ok: true; where: string }
+  | { ok: true; where: string; fields: string[] }
   | { ok: false; error: string };
 
 const TOKEN =
@@ -17,7 +17,7 @@ const TOKEN =
 
 export function checkWhere(raw: string | undefined, fields: string[]): WhereCheck {
   const where = (raw ?? "").trim();
-  if (where === "") return { ok: true, where: "1=1" };
+  if (where === "") return { ok: true, where: "1=1", fields: [] };
   if (where.length > MAX_LENGTH) {
     return { ok: false, error: `WHERE clause is longer than ${MAX_LENGTH} characters. Simplify the filter.` };
   }
@@ -29,6 +29,10 @@ export function checkWhere(raw: string | undefined, fields: string[]): WhereChec
   let depth = 0;
   let pos = 0;
   let out = "";
+  const used = new Set<string>();
+  // Last two non-space tokens, to catch an empty IN () list.
+  let prev = "";
+  let prev2 = "";
 
   while (pos < where.length) {
     TOKEN.lastIndex = pos;
@@ -41,6 +45,9 @@ export function checkWhere(raw: string | undefined, fields: string[]): WhereChec
 
     if (tok === "(") depth++;
     if (tok === ")" && --depth < 0) return { ok: false, error: "Unbalanced parentheses." };
+    if (tok === ")" && prev === "(" && prev2.toUpperCase() === "IN") {
+      return { ok: false, error: "IN () needs at least one value. Call get_dataset_schema to see the values in the layer." };
+    }
 
     if (/^[A-Za-z_]/.test(tok)) {
       const upper = tok.toUpperCase();
@@ -48,6 +55,7 @@ export function checkWhere(raw: string | undefined, fields: string[]): WhereChec
         tok = upper;
       } else if (byUpper.has(upper)) {
         tok = byUpper.get(upper)!; // canonical field spelling
+        used.add(tok);
       } else {
         const hint = closest(upper, [...byUpper.keys()]);
         return {
@@ -60,10 +68,25 @@ export function checkWhere(raw: string | undefined, fields: string[]): WhereChec
       }
     }
     out += tok;
+    if (tok.trim()) {
+      prev2 = prev;
+      prev = tok;
+    }
   }
 
   if (depth !== 0) return { ok: false, error: "Unbalanced parentheses." };
-  return { ok: true, where: out.trim() };
+  return { ok: true, where: out.trim(), fields: [...used] };
+}
+
+// Leave closed hospitals out unless the filter already says something about
+// STATUS. Decided from the field names the gate saw, not the raw text, so a
+// value like NAME LIKE '%STATUS%' can't switch the safety default off.
+export function applyOpenOnly(datasetId: string, check: { where: string; fields: string[] }): { where: string; applied: boolean } {
+  if (datasetId !== "hospitals" || check.fields.some((f) => f.toUpperCase() === "STATUS")) {
+    return { where: check.where, applied: false };
+  }
+  const where = check.where === "1=1" ? "STATUS = 'OPEN'" : `(${check.where}) AND STATUS = 'OPEN'`;
+  return { where, applied: true };
 }
 
 export type FieldCheck =

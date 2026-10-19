@@ -2,6 +2,8 @@
 
 **[Try the live map →](https://aashisho1o1.github.io/geoassist-mcp/)** No install, no sign-in. It opens on a real active US wildfire.
 
+[![GeoAssist Hazard Proximity Live Demo](assets/demo.png)](https://aashisho1o1.github.io/geoassist-mcp/)
+
 When a wildfire or a severe storm is active, the first questions are usually simple ones. Which hospitals are close to it? Which schools might need to close or serve as shelters? Is there a trauma center with a helipad nearby?
 
 The data to answer those questions is already public in Esri's Living Atlas, and NASA EONET already tracks the events. This MCP server connects the two, so anyone using Claude Desktop, Cursor, or another MCP client can ask in plain English and get a short list of nearby places, closest first, with phone numbers.

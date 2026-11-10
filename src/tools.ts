@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DATASETS, DATASET_IDS } from "./datasets.js";
-import { getSchema, findNearby } from "./arcgis.js";
+import { getSchema, findNearby, getDataSource } from "./arcgis.js";
 import { listHazards, getHazard, inUS, HAZARD_CATEGORIES } from "./eonet.js";
 import { checkWhere, checkFields, applyOpenOnly } from "./where.js";
 
@@ -49,9 +49,10 @@ export function buildServer(): McpServer {
   server.registerTool(
     "get_dataset_schema",
     {
-      title: "Describe a Living Atlas dataset",
+      title: "Describe a dataset",
       description:
-        "Fields, types, and real example values for one dataset (hospitals, schools, or cities). " +
+        "Fields, types, and real example values for one public ArcGIS layer (hospitals, schools, or cities), " +
+        "plus where the data comes from and when the layer was last edited. " +
         "Call this before writing a where filter so field names and value formats are right.",
       inputSchema: { dataset: z.enum(DATASET_IDS) },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -60,7 +61,14 @@ export function buildServer(): McpServer {
       const ds = DATASETS[dataset];
       try {
         const fields = await getSchema(ds);
-        return text({ dataset: ds.id, name: ds.name, description: ds.description, fields, caveat: ds.caveat });
+        return text({
+          dataset: ds.id,
+          name: ds.name,
+          description: ds.description,
+          data_source: await getDataSource(ds),
+          fields,
+          caveat: ds.caveat,
+        });
       } catch (e) {
         return fail(e);
       }
@@ -74,9 +82,11 @@ export function buildServer(): McpServer {
       description:
         "Hospitals, schools, or cities within a radius of an EONET event or a lat/lon point, closest first, " +
         "with an optional where filter (for example HELIPAD = 'Y'). Coded fields such as TRAUMA are spelled many ways " +
-        "('LEVEL I', 'LEVEL  I', 'I', 'LEVEL I TRAUMA', ...): get_dataset_schema lists every value, so filter with " +
+        "('LEVEL I', 'I', 'LEVEL 1', 'PEDIATRIC LEVEL I', ...): get_dataset_schema lists every value, so filter with " +
         "IN (...) over all the spellings that match, not a single LIKE pattern. " +
-        "Returns the exact query sent to ArcGIS so the person can see what was asked.",
+        "Returns the exact query sent to ArcGIS so the person can see what was asked. " +
+        "total_in_radius is the number of matches inside the radius asked for; results is only the closest few. " +
+        "data_source says who hosts the layer and when it was last edited: tell the person if it is old.",
       inputSchema: {
         dataset: z.enum(DATASET_IDS),
         event_id: z.string().optional().describe("An id from list_active_hazards. Use this or latitude/longitude."),
@@ -127,13 +137,18 @@ export function buildServer(): McpServer {
         });
 
         const isInsideUS = inUS(center.latitude, center.longitude);
+        const dataSource = await getDataSource(ds);
 
         return text({
           center,
           radius_miles: args.radius_miles,
           ...result,
+          data_source: dataSource,
           notes: [
             ds.caveat,
+            dataSource.layer_last_edited
+              ? `This layer was last edited on ${dataSource.layer_last_edited}. Anything that changed after that date is not in it.`
+              : "This layer does not report when it was last edited, so its age is unknown.",
             "Distances are straight-line miles, not driving distance.",
             ...(filteredOpen
               ? ["Filtered to open facilities (STATUS = 'OPEN') by default. To include closed facilities, set open_only: false or specify STATUS in the where clause."]
@@ -142,12 +157,12 @@ export function buildServer(): McpServer {
               ? [`This area is dense, so the search used a ${result.effective_radius_miles}-mile circle: small enough to fetch every place inside it, which guarantees these are the closest ones.`]
               : []),
             ...(!result.closest_guaranteed
-              ? [`This area has more than 200 matches even within ${result.effective_radius_miles} miles, so these are the closest of a subset and a nearer place may be missing. Use a tighter filter or a smaller radius.`]
+              ? [`This area has more than ${result.fetch_cap} matches even within ${result.effective_radius_miles} miles, so these are the closest of a subset and a nearer place may be missing. Use a tighter filter or a smaller radius.`]
               : []),
             ...(!isInsideUS
-              ? ["Center point is outside the US. The queried Living Atlas layers only cover US territory, so matches may be empty."]
+              ? ["Center point is outside the US. These layers only cover US territory, so matches may be empty."]
               : []),
-            ...(result.matches_found === 0 && isInsideUS
+            ...(result.matches_in_effective_radius === 0 && isInsideUS
               ? ["Nothing matched. Try a larger radius or a looser filter before concluding there is none."]
               : []),
           ],

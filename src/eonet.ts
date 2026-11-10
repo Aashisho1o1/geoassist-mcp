@@ -17,7 +17,7 @@ export interface Hazard {
 }
 
 // Rough boxes for the contiguous US, Alaska, Hawaii, and Puerto Rico. The
-// Living Atlas layers here only cover the US, so events elsewhere are noise.
+// layers queried here only cover the US, so events elsewhere are noise.
 const US_BOXES: [number, number, number, number][] = [
   [-125, 24, -66, 50], // [minLon, minLat, maxLon, maxLat]
   [-180, 51, -129, 72],

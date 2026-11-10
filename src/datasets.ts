@@ -1,6 +1,12 @@
-// The three Living Atlas layers GeoAssist already used. Field lists are not
+// The three public layers this server can query. Field lists are not
 // hardcoded here on purpose: the server reads them from the live layer, so
 // validation always matches what the service will actually accept.
+//
+// Only the cities layer is an Esri Living Atlas item. The hospital and school
+// layers are copies of HIFLD data hosted on ArcGIS Online by FEMA accounts.
+// `source` says so in every answer, next to the date the layer was last
+// edited (read live from the service), so nobody mistakes them for current,
+// authoritative records.
 
 export type DatasetId = "hospitals" | "schools" | "cities";
 
@@ -13,18 +19,31 @@ export interface Dataset {
   contactFields: string[];
   // A short note shown with every result so nobody treats the data as live.
   caveat: string;
+  // Where the data comes from and who hosts this copy.
+  source: {
+    origin: string;
+    hosted_by: string;
+    item_url: string;
+    living_atlas: boolean;
+  };
 }
 
 export const DATASETS: Record<DatasetId, Dataset> = {
   hospitals: {
     id: "hospitals",
     name: "US Hospitals",
-    url: "https://services2.arcgis.com/FiaPA4ga0iQKduv3/arcgis/rest/services/Hospitals/FeatureServer/0",
+    url: "https://services.arcgis.com/XG15cJAlne2vxtgt/arcgis/rest/services/Hospitals_hifld/FeatureServer/0",
     description:
-      "7,500+ US hospitals with beds, trauma level, helipad, owner, status, and phone.",
+      "About 7,500 US hospitals with beds, trauma level, helipad, owner, status, and phone.",
     contactFields: ["NAME", "ADDRESS", "CITY", "STATE", "TELEPHONE", "STATUS"],
     caveat:
-      "Hospital status, beds, and phone numbers come from a public Living Atlas layer and can be out of date. Call ahead before sending anyone. In an emergency, call 911.",
+      "Hospital status, beds, and phone numbers come from an old public snapshot of HIFLD data (its date is given with every answer), not a live or authoritative feed. A hospital listed as open may have closed. Call ahead before sending anyone. In an emergency, call 911.",
+    source: {
+      origin: "Homeland Infrastructure Foundation-Level Data (HIFLD) Hospitals",
+      hosted_by: "FEMA Region 6 GIS (ArcGIS Online account FEMA_Region_6_GIS)",
+      item_url: "https://www.arcgis.com/home/item.html?id=38eebc0197034d59b331eaa7f753cdb0",
+      living_atlas: false,
+    },
   },
   schools: {
     id: "schools",
@@ -34,7 +53,13 @@ export const DATASETS: Record<DatasetId, Dataset> = {
       "100,000+ US public schools with level, enrollment, grades, teachers, and phone.",
     contactFields: ["NAME", "ADDRESS", "CITY", "STATE", "TELEPHONE", "ENROLLMENT"],
     caveat:
-      "School records come from a public Living Atlas layer. Enrollment and contact details may lag the current school year. Confirm with the district.",
+      "School records come from a public copy of HIFLD data (its date is given with every answer). Enrollment and contact details may lag the current school year. Confirm with the district.",
+    source: {
+      origin: "Homeland Infrastructure Foundation-Level Data (HIFLD) Public Schools, from NCES Common Core of Data",
+      hosted_by: "FEMA (ArcGIS Online account FEMA_HQ_Preparedness_NIC)",
+      item_url: "https://www.arcgis.com/home/item.html?id=963a2d204098495a8a80134ed9dc95ae",
+      living_atlas: false,
+    },
   },
   cities: {
     id: "cities",
@@ -43,6 +68,12 @@ export const DATASETS: Record<DatasetId, Dataset> = {
     description: "Major US cities with population and household counts.",
     contactFields: ["NAME", "STATE_ABBR", "POPULATION"],
     caveat: "City populations in this layer come from US Census estimates.",
+    source: {
+      origin: "USA Major Cities (Esri; US Census Bureau)",
+      hosted_by: "Esri (ArcGIS Living Atlas, account esri_dm)",
+      item_url: "https://www.arcgis.com/home/item.html?id=9df5e769bfe8412b8de36a2e618c7672",
+      living_atlas: true,
+    },
   },
 };
 

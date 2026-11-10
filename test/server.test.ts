@@ -188,7 +188,7 @@ test("find_nearby filters out null/NaN geometries and sorts remaining cleanly", 
     }),
   );
   // nearbyJson had 2 with geometry and 1 with null geometry
-  assert.equal(r.matches_found, 2);
+  assert.equal(r.matches_in_effective_radius, 2);
   assert.equal(r.results.length, 2);
   assert.equal(r.results[0].attributes.NAME, "Close Community");
 });
@@ -314,4 +314,88 @@ test("schema lists every value of a coded field", async () => {
   const trauma = r.fields.find((f: any) => f.name === "TRAUMA");
   assert.equal(trauma.examples.length, 55);
   assert.equal(trauma.all_values, true);
+});
+
+// ---- data source and honest totals ----
+
+// A layer that reports its own limits and edit date, and answers count queries.
+function describedFetch(opts: { total?: number; countFails?: boolean } = {}) {
+  const calls: URL[] = [];
+  const fn = (async (input: string | URL) => {
+    const url = String(input);
+    const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200 });
+    if (url.endsWith("?f=json")) {
+      return json({ ...layerJson, maxRecordCount: 2000, editingInfo: { dataLastEditDate: Date.UTC(2021, 7, 30) } });
+    }
+    const u = new URL(url);
+    calls.push(u);
+    if (u.searchParams.get("returnCountOnly")) {
+      return opts.countFails ? new Response("boom", { status: 500 }) : json({ count: opts.total ?? 2 });
+    }
+    if (u.searchParams.get("returnDistinctValues")) return json({ features: [] });
+    if (u.searchParams.get("geometryType")) return json(nearbyJson);
+    return json(sampleJson);
+  }) as typeof fetch;
+  return { fn, calls };
+}
+
+test("every answer says where the data comes from and how old the layer is", async () => {
+  globalThis.fetch = describedFetch().fn;
+  const client = await connect();
+  const schema = body(await client.callTool({ name: "get_dataset_schema", arguments: { dataset: "hospitals" } }));
+  assert.equal(schema.data_source.living_atlas, false);
+  assert.equal(schema.data_source.layer_last_edited, "2021-08-30");
+  assert.match(schema.data_source.hosted_by, /FEMA/);
+
+  const r = body(
+    await client.callTool({ name: "find_nearby", arguments: { dataset: "hospitals", latitude: 34.1, longitude: -117.7 } }),
+  );
+  assert.equal(r.data_source.layer_last_edited, "2021-08-30");
+  assert.ok(r.notes.some((n: string) => n.includes("last edited on 2021-08-30")));
+});
+
+test("only the cities layer is described as Living Atlas", () => {
+  assert.equal(DATASETS.cities.source.living_atlas, true);
+  assert.equal(DATASETS.hospitals.source.living_atlas, false);
+  assert.equal(DATASETS.schools.source.living_atlas, false);
+  for (const ds of Object.values(DATASETS)) {
+    if (!ds.source.living_atlas) assert.doesNotMatch(ds.caveat + ds.description, /Living Atlas/);
+  }
+});
+
+test("total_in_radius is the count for the radius asked for, not the rows returned", async () => {
+  const { fn, calls } = describedFetch({ total: 137 });
+  globalThis.fetch = fn;
+  const r = body(
+    await (await connect()).callTool({
+      name: "find_nearby",
+      arguments: { dataset: "hospitals", latitude: 34.1, longitude: -117.7, radius_miles: 40, limit: 1 },
+    }),
+  );
+  assert.equal(r.total_in_radius, 137);
+  assert.equal(r.results.length, 1);
+  assert.equal(r.matches_in_effective_radius, 2);
+  const count = calls.find((u) => u.searchParams.get("returnCountOnly"))!;
+  assert.equal(count.searchParams.get("distance"), "40");
+  assert.equal(count.searchParams.get("where"), "STATUS = 'OPEN'"); // same filter as the list
+});
+
+test("a failed count is reported as unknown, never as zero", async () => {
+  globalThis.fetch = describedFetch({ countFails: true }).fn;
+  const r = body(
+    await (await connect()).callTool({ name: "find_nearby", arguments: { dataset: "hospitals", latitude: 34.1, longitude: -117.7 } }),
+  );
+  assert.equal(r.total_in_radius, null);
+  assert.equal(r.results.length, 2);
+});
+
+test("asks for as many rows as the layer allows, not a fixed 200", async () => {
+  const { fn, calls } = describedFetch();
+  globalThis.fetch = fn;
+  const r = body(
+    await (await connect()).callTool({ name: "find_nearby", arguments: { dataset: "hospitals", latitude: 34.1, longitude: -117.7 } }),
+  );
+  assert.equal(r.fetch_cap, 2000);
+  const list = calls.find((u) => u.searchParams.get("geometryType") && !u.searchParams.get("returnCountOnly"))!;
+  assert.equal(list.searchParams.get("resultRecordCount"), "2000");
 });

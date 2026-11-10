@@ -12,8 +12,45 @@ export interface FieldInfo {
 // Schemas are read once per process from the live layer, then reused.
 const schemaCache = new Map<string, FieldInfo[]>();
 
+// Facts about the layer itself, read from the same response as the fields.
+export interface LayerInfo {
+  // Most rows the service will return for one request.
+  maxRecordCount: number;
+  // When the layer's data was last edited, as YYYY-MM-DD, or null if the
+  // service doesn't say.
+  lastEdited: string | null;
+}
+const layerCache = new Map<string, LayerInfo>();
+
 export function clearSchemaCache(): void {
   schemaCache.clear();
+  layerCache.clear();
+}
+
+// Used when a layer doesn't report its own limit.
+const DEFAULT_FETCH_CAP = 200;
+
+function readLayerInfo(layer: any): LayerInfo {
+  const max = Number(layer?.maxRecordCount);
+  const edited = layer?.editingInfo?.dataLastEditDate ?? layer?.editingInfo?.lastEditDate;
+  return {
+    maxRecordCount: Number.isFinite(max) && max > 0 ? max : DEFAULT_FETCH_CAP,
+    lastEdited: typeof edited === "number" ? new Date(edited).toISOString().slice(0, 10) : null,
+  };
+}
+
+export async function getLayerInfo(ds: Dataset): Promise<LayerInfo> {
+  const cached = layerCache.get(ds.id);
+  if (cached) return cached;
+  const info = readLayerInfo(await getJson(`${ds.url}?f=json`));
+  layerCache.set(ds.id, info);
+  return info;
+}
+
+// What every answer says about where its data came from.
+export async function getDataSource(ds: Dataset) {
+  const info = await getLayerInfo(ds);
+  return { ...ds.source, layer_last_edited: info.lastEdited };
 }
 
 async function getJson(url: string): Promise<any> {
@@ -32,6 +69,7 @@ export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
   if (cached) return cached;
 
   const layer = await getJson(`${ds.url}?f=json`);
+  layerCache.set(ds.id, readLayerInfo(layer));
   const sample = await getJson(
     `${ds.url}/query?${new URLSearchParams({
       where: "1=1",
@@ -59,8 +97,8 @@ export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
     };
   });
 
-  // Coded fields like TRAUMA are messy in practice (about 55 spellings of
-  // trauma levels: 'LEVEL I', 'LEVEL  I', 'I', 'LEVEL I TRAUMA', ...). A sample
+  // Coded fields like TRAUMA are messy in practice (60 distinct values for
+  // trauma levels: 'LEVEL I', 'I', 'LEVEL 1', 'PEDIATRIC LEVEL I', ...). A sample
   // misses most of them, so fetch the full list for these fields. The model
   // can only write a filter that catches every Level I center if it sees them all.
   await Promise.all(
@@ -111,15 +149,38 @@ export interface NearbyQuery {
   limit: number;
 }
 
-// Feature services return at most FETCH_CAP matches, in storage order rather
-// than by distance. If everything inside the circle fits, sorting here gives
-// the true closest places. If it doesn't fit (a big radius in a dense city),
-// the 200 we got are an arbitrary subset, so we search for a smaller radius
-// that both fits under the cap and still holds at least `limit` places.
-const FETCH_CAP = 200;
+// A feature service returns at most its maxRecordCount rows per request (2,000
+// on the layers used here), in storage order rather than by distance. If
+// everything inside the circle fits, sorting here gives the true closest
+// places. If it doesn't fit (a big radius in a dense city), the rows we got
+// are an arbitrary subset, so we search for a smaller radius that both fits
+// under the cap and still holds at least `limit` places.
 const MAX_SHRINK_STEPS = 6;
 
 export async function findNearby(ds: Dataset, q: NearbyQuery) {
+  const fetchCap = (await getLayerInfo(ds)).maxRecordCount;
+  const spatial = (radius: number) => ({
+    where: q.where,
+    geometry: `${q.longitude},${q.latitude}`,
+    geometryType: "esriGeometryPoint",
+    inSR: "4326",
+    spatialRel: "esriSpatialRelIntersects",
+    distance: String(radius),
+    units: "esriSRUnit_StatuteMile",
+  });
+  // How many places match inside the radius that was asked for. The list
+  // below can come from a smaller circle, so this is the only honest total.
+  // A failed count is reported as unknown (null), never as 0.
+  const countAll = async (): Promise<number | null> => {
+    try {
+      const body = await getJson(
+        `${ds.url}/query?${new URLSearchParams({ ...spatial(q.radiusMiles), returnCountOnly: "true", f: "json" })}`,
+      );
+      return typeof body.count === "number" ? body.count : null;
+    } catch {
+      return null;
+    }
+  };
   const makeParams = (radius: number) => ({
     where: q.where,
     outFields: q.outFields.join(","),
@@ -131,7 +192,7 @@ export async function findNearby(ds: Dataset, q: NearbyQuery) {
     distance: String(radius),
     units: "esriSRUnit_StatuteMile",
     returnGeometry: "true",
-    resultRecordCount: String(FETCH_CAP),
+    resultRecordCount: String(fetchCap),
     f: "json",
   });
   const run = async (radius: number) => {
@@ -140,7 +201,8 @@ export async function findNearby(ds: Dataset, q: NearbyQuery) {
     return { radius, params, features: (body.features ?? []) as any[], exceeded: Boolean(body.exceededTransferLimit) };
   };
 
-  let chosen = await run(q.radiusMiles);
+  const [first, total] = await Promise.all([run(q.radiusMiles), countAll()]);
+  let chosen = first;
 
   if (chosen.exceeded) {
     // Binary search between a radius known to hold too few (lo) and one known
@@ -182,9 +244,14 @@ export async function findNearby(ds: Dataset, q: NearbyQuery) {
 
   return {
     query_sent: { endpoint: `${ds.url}/query`, ...chosen.params },
-    matches_found: results.length,
+    // Every match inside radius_miles, or null if the count request failed.
+    total_in_radius: total,
+    // Matches read from the circle that was actually searched
+    // (effective_radius_miles), which can be smaller than radius_miles.
+    matches_in_effective_radius: results.length,
     more_beyond_cap: chosen.exceeded,
-    // False only when even the smallest circle tried had more than FETCH_CAP
+    fetch_cap: fetchCap,
+    // False only when even the smallest circle tried had more than fetch_cap
     // places, so the list is the closest of a subset, not guaranteed closest.
     closest_guaranteed: !chosen.exceeded,
     effective_radius_miles: chosen.radius,

@@ -4,7 +4,7 @@
 // reaches through MCP. Only the map and the page are new.
 
 import { DATASETS } from "./lib/datasets.js";
-import { getSchema, findNearby } from "./lib/arcgis.js";
+import { getSchema, findNearby, getDataSource } from "./lib/arcgis.js";
 import { listHazards, inUS } from "./lib/eonet.js";
 import { checkWhere, checkFields, applyOpenOnly } from "./lib/where.js";
 
@@ -26,7 +26,7 @@ const [EsriMap, MapView, Basemap, TileLayer, GraphicsLayer, Graphic, Circle, Poi
 
 // ---------- presets ----------
 
-// Values like 'LEVEL I', 'LEVEL  I', 'I', 'LEVEL I TRAUMA', 'PEDIATRIC LEVEL I'
+// Values like 'LEVEL I', 'I', 'LEVEL 1', 'LEVEL I, PEDIATRIC I', 'PEDIATRIC LEVEL I'
 // all mean a Level I center. Split on anything that isn't a letter or digit
 // and look for a standalone I or 1, which never matches II, III, or IV.
 const isLevelI = (v) => v.toUpperCase().split(/[^A-Z0-9]+/).some((t) => t === "I" || t === "1");
@@ -417,8 +417,11 @@ async function run({ zoom = false } = {}) {
     });
     if (token !== runToken) return;
 
+    const source = await getDataSource(ds);
+    if (token !== runToken) return;
+
     drawCenter(state.radius, result.effective_radius_miles);
-    renderResults(ds, result, gate, raw, where, filteredOpen);
+    renderResults(ds, result, gate, raw, where, filteredOpen, source);
     if (state.preset === "level1" && state.custom === null && ds.id === "hospitals") renderLevelICard(ds, schema);
   } catch (e) {
     if (token !== runToken) return;
@@ -442,8 +445,12 @@ function tags(a, dsId) {
   return t;
 }
 
-function renderResults(ds, result, gate, raw, where, filteredOpen) {
+function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
   const n = result.results.length;
+  // The number of matches in the circle the person asked for. The list is
+  // only the closest few, so say "10 of 137" whenever the total is known.
+  const total = result.total_in_radius;
+  const ofTotal = typeof total === "number" && total > n ? ` of ${total.toLocaleString()} matching` : "";
   const what = ds.id === "hospitals" ? (n === 1 ? "hospital" : "hospitals") : n === 1 ? "school" : "schools";
   if (n === 0) {
     const wider = Math.min(100, state.radius * 2);
@@ -460,10 +467,13 @@ function renderResults(ds, result, gate, raw, where, filteredOpen) {
   } else {
     const shrunk = result.effective_radius_miles < state.radius;
     setStatus(
-      (n < 10 ? `${n === 1 ? "The only matching" : `All ${n} matching`} ${what}, closest first` : `The ${n} closest ${what}`) +
+      (n < 10 && !ofTotal
+        ? `${n === 1 ? "The only matching" : `All ${n} matching`} ${what}, closest first`
+        : `The ${n} closest${ofTotal} ${what}`) +
+        ` within ${state.radius} miles.` +
         (shrunk
-          ? `. This area is dense, so the search narrowed to ${result.effective_radius_miles} miles (inner ring) to be sure these really are the closest.`
-          : ` within ${state.radius} miles.`) +
+          ? ` This area is dense, so the search read a ${result.effective_radius_miles}-mile circle (inner ring) in full to be sure these really are the closest.`
+          : "") +
         (result.closest_guaranteed ? "" : " <strong>Too many places to be sure these are the very closest. Try a tighter filter.</strong>"),
     );
   }
@@ -488,7 +498,9 @@ function renderResults(ds, result, gate, raw, where, filteredOpen) {
     .join("");
 
   drawPlaces(result.results, ds.id);
-  $("caveat").textContent = `${ds.caveat}`;
+  $("caveat").textContent =
+    `${ds.caveat} Source: ${source.origin}, hosted by ${source.hosted_by}. ` +
+    (source.layer_last_edited ? `Layer last edited ${source.layer_last_edited}.` : "The layer does not report when it was last edited.");
 
   // "How this answer was made": the same transparency the MCP tool returns.
   const q = { ...result.query_sent };
@@ -499,9 +511,14 @@ function renderResults(ds, result, gate, raw, where, filteredOpen) {
     "Distances are straight-line miles, not driving distance.",
     ...(filteredOpen ? ["Closed hospitals are left out by default (STATUS = 'OPEN')."] : []),
     ...(result.effective_radius_miles < state.radius
-      ? [`More than 200 places fall inside ${state.radius} miles, and ArcGIS returns at most 200 in no particular order. So the search narrowed the circle to ${result.effective_radius_miles} miles, where every place fits, then sorted by distance.`]
+      ? [`More than ${result.fetch_cap.toLocaleString()} places fall inside ${state.radius} miles, and this layer returns at most ${result.fetch_cap.toLocaleString()} rows per request, in no particular order. So the search narrowed the circle to ${result.effective_radius_miles} miles, where every place fits, then sorted by distance.`]
       : []),
     ...(!inUS(state.center.latitude, state.center.longitude) ? ["This point is outside the US. These layers only cover the US."] : []),
+    ...(typeof total === "number"
+      ? [`${total.toLocaleString()} ${total === 1 ? "place matches" : "places match"} inside ${state.radius} miles (counted by ArcGIS, not by this page).`]
+      : ["The total inside this circle could not be counted, so only the list above is known."]),
+    `Data: ${source.origin}. This copy is hosted by ${source.hosted_by}` +
+      (source.layer_last_edited ? ` and was last edited ${source.layer_last_edited}.` : "."),
   ];
   $("howBody").innerHTML = `
     <h3>1. Filter check <span class="gate-ok">passed</span></h3>

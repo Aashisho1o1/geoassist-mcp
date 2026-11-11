@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+
+      # The live demo runs the compiled server modules committed in docs/lib.
+      # Fail if they no longer match what src/ builds to.
+      - run: npm run build:demo
+      # git status also sees a new, untracked file that git diff would miss.
+      - run: test -z "$(git status --porcelain -- docs/lib)" || (git status --porcelain -- docs/lib; exit 1)
+      # Every module the demo imports must have been copied.
+      - run: node -e "import('./docs/lib/core.js')"

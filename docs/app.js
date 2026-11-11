@@ -3,10 +3,8 @@
 // the radius search, and the EONET handling are the exact code an AI client
 // reaches through MCP. Only the map and the page are new.
 
-import { DATASETS } from "./lib/datasets.js";
-import { getSchema, findNearby } from "./lib/arcgis.js";
+import { DATASETS, getSchema, findNearby, getDataSource, checkFilter, checkFields } from "./lib/core.js";
 import { listHazards, inUS } from "./lib/eonet.js";
-import { checkWhere, checkFields, applyOpenOnly } from "./lib/where.js";
 
 const [EsriMap, MapView, Basemap, TileLayer, GraphicsLayer, Graphic, Circle, Point] = await new Promise((resolve) =>
   window.require(
@@ -26,10 +24,6 @@ const [EsriMap, MapView, Basemap, TileLayer, GraphicsLayer, Graphic, Circle, Poi
 
 // ---------- presets ----------
 
-// Values like 'LEVEL I', 'LEVEL  I', 'I', 'LEVEL I TRAUMA', 'PEDIATRIC LEVEL I'
-// all mean a Level I center. Split on anything that isn't a letter or digit
-// and look for a standalone I or 1, which never matches II, III, or IV.
-const isLevelI = (v) => v.toUpperCase().split(/[^A-Z0-9]+/).some((t) => t === "I" || t === "1");
 const sqlList = (vals) => vals.map((v) => `'${v.replace(/'/g, "''")}'`).join(", ");
 
 const PRESETS = {
@@ -54,9 +48,11 @@ const EXTRA_FIELDS = {
   schools: ["LEVEL_", "ST_GRADE", "END_GRADE", "SHELTER_ID"],
 };
 
+// Every spelling of a Level I center, as worked out (and tested) by the
+// server's own value group for the TRAUMA field.
 function levelISpellings(schema) {
   const f = schema.find((x) => x.name === "TRAUMA");
-  return (f?.examples ?? []).filter(isLevelI);
+  return f?.value_groups?.LEVEL_I?.values ?? [];
 }
 
 // ---------- state ----------
@@ -241,18 +237,27 @@ view.on("click", async (event) => {
 
 // ---------- hazards ----------
 
+// Only the newest request may update the list: a slow answer for a tab the
+// person has already left must not overwrite the tab they are on.
+let hazardToken = 0;
+
 async function loadHazards(category, { autoselect = false } = {}) {
+  const token = ++hazardToken;
   state.category = category;
   for (const b of $("categoryTabs").children) b.setAttribute("aria-selected", String(b.dataset.cat === category));
   $("hazardList").innerHTML = `<li class="empty">Loading open events from NASA EONET…</li>`;
+  let hazards;
   try {
-    state.hazards = await listHazards(category, 30);
+    hazards = await listHazards(category, 30);
   } catch (e) {
+    if (token !== hazardToken) return false;
     state.hazards = [];
     $("hazardList").innerHTML = `<li class="empty">Couldn't reach NASA EONET (${esc(e.message)}). You can still click the map.</li>`;
     drawHazards();
     return false;
   }
+  if (token !== hazardToken) return false;
+  state.hazards = hazards;
   renderHazardList();
   drawHazards();
   if (autoselect && state.hazards.length) {
@@ -267,7 +272,7 @@ function renderHazardList() {
   const list = $("hazardList");
   if (!state.hazards.length) {
     const name = $("categoryTabs").querySelector(`[data-cat="${state.category}"]`).textContent.toLowerCase();
-    list.innerHTML = `<li class="empty">No open ${esc(name)} in the US in the last 30 days. Good news, or try another type.</li>`;
+    list.innerHTML = `<li class="empty">NASA EONET lists no open ${esc(name)} in the US in the last 30 days. Try another type, or click the map.</li>`;
     return;
   }
   list.innerHTML = state.hazards
@@ -389,10 +394,10 @@ async function run({ zoom = false } = {}) {
     const raw = state.custom ?? preset.where(schema);
 
     // 1. The gate. A refused filter never reaches ArcGIS.
-    const gate = checkWhere(raw, names);
+    const gate = checkFilter(ds, schema, raw);
     if (!gate.ok) {
       setStatus(
-        `<strong>Refused before reaching ArcGIS.</strong> ${esc(gate.error)}<br /><span class="small">
+        `<strong>Refused before reaching ArcGIS.</strong> ${esc(gate.error)} Call get_dataset_schema to see the valid fields and values.<br /><span class="small">
         This is the message an AI client gets back, so it can fix the filter and try again instead of
         showing an empty map that looks like "nothing nearby".</span>`,
         "error",
@@ -404,7 +409,7 @@ async function run({ zoom = false } = {}) {
     if (!fields.ok) throw new Error(fields.error);
 
     // 2. Same open-only rule the MCP tool applies by default.
-    const { where, applied: filteredOpen } = applyOpenOnly(ds.id, gate);
+    const { where, openOnlyApplied: filteredOpen } = gate;
 
     setStatus("Asking ArcGIS for places inside the circle…");
     const result = await findNearby(ds, {
@@ -417,8 +422,11 @@ async function run({ zoom = false } = {}) {
     });
     if (token !== runToken) return;
 
+    const source = await getDataSource(ds);
+    if (token !== runToken) return;
+
     drawCenter(state.radius, result.effective_radius_miles);
-    renderResults(ds, result, gate, raw, where, filteredOpen);
+    renderResults(ds, result, gate, raw, where, filteredOpen, source);
     if (state.preset === "level1" && state.custom === null && ds.id === "hospitals") renderLevelICard(ds, schema);
   } catch (e) {
     if (token !== runToken) return;
@@ -442,14 +450,22 @@ function tags(a, dsId) {
   return t;
 }
 
-function renderResults(ds, result, gate, raw, where, filteredOpen) {
+function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
   const n = result.results.length;
+  // The number of matches in the circle the person asked for. The list is
+  // only the closest few, so say "10 of 137" whenever the total is known.
+  const total = result.total_in_radius;
+  const ofTotal = typeof total === "number" && total > n ? ` of ${total.toLocaleString()} matching` : "";
   const what = ds.id === "hospitals" ? (n === 1 ? "hospital" : "hospitals") : n === 1 ? "school" : "schools";
+  // A value the layer doesn't have is the likeliest reason for a short or
+  // empty list, so say it next to the result, not only in the details below.
+  const warned = gate.warnings.length ? `<br /><span class="small"><strong>Check the filter:</strong> ${gate.warnings.map(esc).join(" ")}</span>` : "";
   if (n === 0) {
     const wider = Math.min(100, state.radius * 2);
     setStatus(
       `No matching ${what} within ${state.radius} miles. That doesn't prove there are none nearby, only none inside this circle.` +
-        (state.radius < 100 ? ` <button class="link" id="widen">Search ${wider} miles instead</button>` : ""),
+        (state.radius < 100 ? ` <button class="link" id="widen">Search ${wider} miles instead</button>` : "") +
+        warned,
     );
     $("widen")?.addEventListener("click", () => {
       state.radius = wider;
@@ -460,11 +476,17 @@ function renderResults(ds, result, gate, raw, where, filteredOpen) {
   } else {
     const shrunk = result.effective_radius_miles < state.radius;
     setStatus(
-      (n < 10 ? `${n === 1 ? "The only matching" : `All ${n} matching`} ${what}, closest first` : `The ${n} closest ${what}`) +
-        (shrunk
-          ? `. This area is dense, so the search narrowed to ${result.effective_radius_miles} miles (inner ring) to be sure these really are the closest.`
-          : ` within ${state.radius} miles.`) +
-        (result.closest_guaranteed ? "" : " <strong>Too many places to be sure these are the very closest. Try a tighter filter.</strong>"),
+      (n < 10 && !ofTotal
+        ? `${n === 1 ? "The only matching" : `All ${n} matching`} ${what}, closest first`
+        : `The ${n} closest${ofTotal} ${what}`) +
+        ` within ${state.radius} miles.` +
+        (shrunk && result.closest_guaranteed
+          ? ` This area is dense, so the search read a ${result.effective_radius_miles}-mile circle (inner ring) in full to be sure these really are the closest.`
+          : "") +
+        (result.closest_guaranteed
+          ? ""
+          : ` <strong>Even a ${result.effective_radius_miles}-mile circle holds more than ${result.fetch_cap.toLocaleString()} places, so these are the closest of the rows that were read and a nearer place may be missing. Try a tighter filter.</strong>`) +
+        warned,
     );
   }
 
@@ -488,7 +510,9 @@ function renderResults(ds, result, gate, raw, where, filteredOpen) {
     .join("");
 
   drawPlaces(result.results, ds.id);
-  $("caveat").textContent = `${ds.caveat}`;
+  $("caveat").textContent =
+    `${ds.caveat} Source: ${source.origin}, hosted by ${source.hosted_by}. ` +
+    (source.layer_last_edited ? `Layer last edited ${source.layer_last_edited}.` : "The layer does not report when it was last edited.");
 
   // "How this answer was made": the same transparency the MCP tool returns.
   const q = { ...result.query_sent };
@@ -497,22 +521,33 @@ function renderResults(ds, result, gate, raw, where, filteredOpen) {
   const url = `${endpoint}?${new URLSearchParams(q)}`;
   const notes = [
     "Distances are straight-line miles, not driving distance.",
-    ...(filteredOpen ? ["Closed hospitals are left out by default (STATUS = 'OPEN')."] : []),
-    ...(result.effective_radius_miles < state.radius
-      ? [`More than 200 places fall inside ${state.radius} miles, and ArcGIS returns at most 200 in no particular order. So the search narrowed the circle to ${result.effective_radius_miles} miles, where every place fits, then sorted by distance.`]
+    ...gate.warnings,
+    ...(filteredOpen ? ["Only hospitals marked OPEN in this snapshot are listed (STATUS = 'OPEN'). The snapshot is old, so that is not the same as open today."] : []),
+    ...(!result.closest_guaranteed
+      ? [`More than ${result.fetch_cap.toLocaleString()} places fall inside even a ${result.effective_radius_miles}-mile circle, and this layer returns at most ${result.fetch_cap.toLocaleString()} rows per request, in no particular order. The list is the closest of the rows that were read, so a nearer place may be missing.`]
+      : result.effective_radius_miles < state.radius
+      ? [`More than ${result.fetch_cap.toLocaleString()} places fall inside ${state.radius} miles, and this layer returns at most ${result.fetch_cap.toLocaleString()} rows per request, in no particular order. So the search narrowed the circle to ${result.effective_radius_miles} miles, where every place fits, then sorted by distance.`]
       : []),
     ...(!inUS(state.center.latitude, state.center.longitude) ? ["This point is outside the US. These layers only cover the US."] : []),
+    ...(typeof total === "number"
+      ? [`${total.toLocaleString()} ${total === 1 ? "place matches" : "places match"} inside ${state.radius} miles (counted by ArcGIS, not by this page).`]
+      : ["The total inside this circle could not be counted, so only the list above is known."]),
+    `Data: ${source.origin}. This copy is hosted by ${source.hosted_by}` +
+      (source.layer_last_edited ? ` and was last edited ${source.layer_last_edited}.` : "."),
   ];
   $("howBody").innerHTML = `
     <h3>1. Filter check <span class="gate-ok">passed</span></h3>
     <p>${
       !raw.trim()
         ? "No filter, so everything inside the circle counts."
-        : raw.trim() === gate.where
-          ? "Every field name in the filter exists in the live layer, and nothing else is in it but values and basic SQL words."
+        : raw.trim() === gate.checked
+          ? "Every field name in the filter exists in the live layer, and nothing else is in it but values and basic SQL words. " +
+            (gate.warnings.length
+              ? "A value was not found in the layer; see the notes below."
+              : "Values compared with = or IN on a coded field were checked against the layer's own list. LIKE patterns, ranges and negated values are not checked.")
           : `You wrote <code>${esc(raw)}</code>. Every field exists in the live layer; it was rewritten with the layer's exact spelling:`
     }</p>
-    ${raw.trim() && raw.trim() !== gate.where ? `<pre>${esc(gate.where)}</pre>` : ""}
+    ${raw.trim() && raw.trim() !== gate.checked ? `<pre>${esc(gate.checked)}</pre>` : ""}
     <h3>2. Sent to ArcGIS</h3>
     <pre>where = ${esc(where)}
 distance = ${esc(q.distance)} ${esc(q.units.replace("esriSRUnit_", "").toLowerCase())}s around ${esc(q.geometry)}</pre>
@@ -557,14 +592,16 @@ async function count(ds, where, nearby) {
 async function renderLevelICard(ds, schema) {
   const token = runToken;
   const spellings = levelISpellings(schema);
+  const adult = schema.find((x) => x.name === "TRAUMA")?.value_groups?.LEVEL_I_ADULT?.values ?? [];
   const naive = "TRAUMA = 'LEVEL I' AND STATUS = 'OPEN'";
   const full = `TRAUMA IN (${sqlList(spellings)}) AND STATUS = 'OPEN'`;
   try {
-    const [nNaive, nFull, usNaive, usFull] = await Promise.all([
+    const [nNaive, nFull, usNaive, usFull, usAdult] = await Promise.all([
       count(ds, naive, true),
       count(ds, full, true),
       count(ds, naive, false),
       count(ds, full, false),
+      adult.length ? count(ds, `TRAUMA IN (${sqlList(adult)}) AND STATUS = 'OPEN'`, false) : Promise.resolve(null),
     ]);
     if (token !== runToken) return;
     const missed = usFull - usNaive;
@@ -575,11 +612,12 @@ async function renderLevelICard(ds, schema) {
         <div><span>Exact 'LEVEL I', in this circle</span><span class="big">${nNaive}</span></div>
         <div><span>Every Level I spelling, in this circle</span><span class="big">${nFull}</span></div>
       </div>
-      Across the US, the exact match finds ${usNaive.toLocaleString()} open Level I hospitals and misses
+      Across the US, the exact match finds ${usNaive.toLocaleString()} hospitals marked open and Level I, and misses
       ${missed.toLocaleString()} more. This search uses every spelling.
+      ${usAdult === null ? "" : `Of the ${usFull.toLocaleString()}, ${usAdult.toLocaleString()} are Level I for adults and ${(usFull - usAdult).toLocaleString()} are Level I for children only.`}
       <details><summary>See the ${spellings.length} spellings it matched</summary>
         <div class="spellings">${spellings.map((s) => `<code>${esc(s)}</code>`).join("")}</div>
-        <p class="small">Includes pediatric Level I centers. Any value with a standalone "I" or "1" counts; II, III and IV never match.</p>
+        <p class="small">Any value with a standalone "I" or "1" counts; II, III and IV never match. That includes centers that are Level I for children only, such as <code>PEDIATRIC I</code>.</p>
       </details>
     </div>`;
   } catch {

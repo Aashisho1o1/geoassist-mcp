@@ -16,13 +16,17 @@ export interface Hazard {
   source_url?: string;
 }
 
-// Rough boxes for the contiguous US, Alaska, Hawaii, and Puerto Rico. The
-// Living Atlas layers here only cover the US, so events elsewhere are noise.
+// Rough boxes for the contiguous US, Alaska, Hawaii, Puerto Rico and the US
+// Virgin Islands, Guam and the Northern Marianas, and American Samoa. The
+// first box also takes in southern Canada and northern Mexico. The
+// layers queried here only cover the US, so events elsewhere are noise.
 const US_BOXES: [number, number, number, number][] = [
   [-125, 24, -66, 50], // [minLon, minLat, maxLon, maxLat]
   [-180, 51, -129, 72],
   [-161, 18, -154, 23],
-  [-68, 17, -65, 19],
+  [-68, 17, -64.5, 19],
+  [144, 13, 146.5, 20.6],
+  [-171.2, -14.6, -168, -11],
 ];
 
 export function inUS(lat: number, lon: number): boolean {

@@ -2,13 +2,17 @@
 // Same feed the Soka disaster monitor used, now feeding an Esri layer query.
 const EONET = "https://eonet.gsfc.nasa.gov/api/v3/events";
 export const HAZARD_CATEGORIES = ["wildfires", "severeStorms", "volcanoes", "floods"];
-// Rough boxes for the contiguous US, Alaska, Hawaii, and Puerto Rico. The
-// Living Atlas layers here only cover the US, so events elsewhere are noise.
+// Rough boxes for the contiguous US, Alaska, Hawaii, Puerto Rico and the US
+// Virgin Islands, Guam and the Northern Marianas, and American Samoa. The
+// first box also takes in southern Canada and northern Mexico. The
+// layers queried here only cover the US, so events elsewhere are noise.
 const US_BOXES = [
     [-125, 24, -66, 50], // [minLon, minLat, maxLon, maxLat]
     [-180, 51, -129, 72],
     [-161, 18, -154, 23],
-    [-68, 17, -65, 19],
+    [-68, 17, -64.5, 19],
+    [144, 13, 146.5, 20.6],
+    [-171.2, -14.6, -168, -11],
 ];
 export function inUS(lat, lon) {
     return US_BOXES.some(([a, b, c, d]) => lon >= a && lon <= c && lat >= b && lat <= d);

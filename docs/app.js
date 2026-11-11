@@ -508,7 +508,7 @@ function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
   } else {
     const shrunk = result.effective_radius_miles < state.radius;
     setStatus(
-      (n < 10 && !ofTotal
+      ((n < 10 && !ofTotal) || total === n
         ? `${n === 1 ? "The only matching" : `All ${n} matching`} ${what}, closest first`
         : `The ${n} closest${ofTotal} ${what}`) +
         ` within ${state.radius} miles.` +

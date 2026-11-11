@@ -7,10 +7,15 @@ export interface FieldInfo {
   examples: string[];
   // True when examples is the complete list of values in the layer.
   all_values?: boolean;
+  // Named sets of values that mean the same thing (see ValueGroup).
+  value_groups?: Record<string, { description: string; values: string[] }>;
 }
 
-// Schemas are read once per process from the live layer, then reused.
-const schemaCache = new Map<string, FieldInfo[]>();
+// Schemas are read from the live layer and reused for an hour, so a layer
+// that changes is picked up without a restart. A schema whose value lists
+// could not all be read is not kept, so the next call tries again.
+const SCHEMA_TTL_MS = 60 * 60 * 1000;
+const schemaCache = new Map<string, { at: number; fields: FieldInfo[] }>();
 
 // Facts about the layer itself, read from the same response as the fields.
 export interface LayerInfo {
@@ -61,12 +66,11 @@ async function getJson(url: string): Promise<any> {
   return body;
 }
 
-const CATEGORICAL_FIELDS = new Set(["TRAUMA", "HELIPAD", "STATUS", "LEVEL_", "TYPE", "OWNER"]);
 const MAX_DISTINCT = 100;
 
 export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
   const cached = schemaCache.get(ds.id);
-  if (cached) return cached;
+  if (cached && Date.now() - cached.at < SCHEMA_TTL_MS) return cached.fields;
 
   const layer = await getJson(`${ds.url}?f=json`);
   layerCache.set(ds.id, readLayerInfo(layer));
@@ -101,9 +105,11 @@ export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
   // trauma levels: 'LEVEL I', 'I', 'LEVEL 1', 'PEDIATRIC LEVEL I', ...). A sample
   // misses most of them, so fetch the full list for these fields. The model
   // can only write a filter that catches every Level I center if it sees them all.
+  const coded = new Set(ds.codedFields.map((f) => f.toUpperCase()));
+  let complete = true;
   await Promise.all(
     fields
-      .filter((f) => CATEGORICAL_FIELDS.has(f.name.toUpperCase()))
+      .filter((f) => coded.has(f.name.toUpperCase()))
       .map(async (f) => {
         try {
           const distinct = await getJson(
@@ -121,15 +127,24 @@ export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
             .map(String);
           if (vals.length > 0) {
             f.examples = [...new Set(vals)].sort().slice(0, MAX_DISTINCT);
-            f.all_values = vals.length <= MAX_DISTINCT;
+            // Complete only if the service sent every value and they all fit.
+            f.all_values = vals.length <= MAX_DISTINCT && !distinct.exceededTransferLimit;
           }
         } catch {
-          // keep the sampled values
+          // Keep the sampled values for this answer, but don't remember them.
+          complete = false;
         }
       }),
   );
 
-  schemaCache.set(ds.id, fields);
+  for (const group of ds.valueGroups ?? []) {
+    const f = fields.find((x) => x.name.toUpperCase() === group.field.toUpperCase());
+    if (!f?.all_values) continue;
+    const values = f.examples.filter(group.matches);
+    if (values.length) (f.value_groups ??= {})[group.name] = { description: group.description, values };
+  }
+
+  if (complete) schemaCache.set(ds.id, { at: Date.now(), fields });
   return fields;
 }
 

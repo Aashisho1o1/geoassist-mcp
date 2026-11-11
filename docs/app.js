@@ -3,10 +3,8 @@
 // the radius search, and the EONET handling are the exact code an AI client
 // reaches through MCP. Only the map and the page are new.
 
-import { DATASETS } from "./lib/datasets.js";
-import { getSchema, findNearby, getDataSource } from "./lib/arcgis.js";
+import { DATASETS, getSchema, findNearby, getDataSource, checkFilter, checkFields } from "./lib/core.js";
 import { listHazards, inUS } from "./lib/eonet.js";
-import { checkWhere, checkFields, applyOpenOnly } from "./lib/where.js";
 
 const [EsriMap, MapView, Basemap, TileLayer, GraphicsLayer, Graphic, Circle, Point] = await new Promise((resolve) =>
   window.require(
@@ -26,10 +24,6 @@ const [EsriMap, MapView, Basemap, TileLayer, GraphicsLayer, Graphic, Circle, Poi
 
 // ---------- presets ----------
 
-// Values like 'LEVEL I', 'I', 'LEVEL 1', 'LEVEL I, PEDIATRIC I', 'PEDIATRIC LEVEL I'
-// all mean a Level I center. Split on anything that isn't a letter or digit
-// and look for a standalone I or 1, which never matches II, III, or IV.
-const isLevelI = (v) => v.toUpperCase().split(/[^A-Z0-9]+/).some((t) => t === "I" || t === "1");
 const sqlList = (vals) => vals.map((v) => `'${v.replace(/'/g, "''")}'`).join(", ");
 
 const PRESETS = {
@@ -54,9 +48,11 @@ const EXTRA_FIELDS = {
   schools: ["LEVEL_", "ST_GRADE", "END_GRADE", "SHELTER_ID"],
 };
 
+// Every spelling of a Level I center, as worked out (and tested) by the
+// server's own value group for the TRAUMA field.
 function levelISpellings(schema) {
   const f = schema.find((x) => x.name === "TRAUMA");
-  return (f?.examples ?? []).filter(isLevelI);
+  return f?.value_groups?.LEVEL_I?.values ?? [];
 }
 
 // ---------- state ----------
@@ -389,7 +385,7 @@ async function run({ zoom = false } = {}) {
     const raw = state.custom ?? preset.where(schema);
 
     // 1. The gate. A refused filter never reaches ArcGIS.
-    const gate = checkWhere(raw, names);
+    const gate = checkFilter(ds, schema, raw);
     if (!gate.ok) {
       setStatus(
         `<strong>Refused before reaching ArcGIS.</strong> ${esc(gate.error)}<br /><span class="small">
@@ -404,7 +400,7 @@ async function run({ zoom = false } = {}) {
     if (!fields.ok) throw new Error(fields.error);
 
     // 2. Same open-only rule the MCP tool applies by default.
-    const { where, applied: filteredOpen } = applyOpenOnly(ds.id, gate);
+    const { where, openOnlyApplied: filteredOpen } = gate;
 
     setStatus("Asking ArcGIS for places inside the circle…");
     const result = await findNearby(ds, {
@@ -509,6 +505,7 @@ function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
   const url = `${endpoint}?${new URLSearchParams(q)}`;
   const notes = [
     "Distances are straight-line miles, not driving distance.",
+    ...gate.warnings,
     ...(filteredOpen ? ["Closed hospitals are left out by default (STATUS = 'OPEN')."] : []),
     ...(result.effective_radius_miles < state.radius
       ? [`More than ${result.fetch_cap.toLocaleString()} places fall inside ${state.radius} miles, and this layer returns at most ${result.fetch_cap.toLocaleString()} rows per request, in no particular order. So the search narrowed the circle to ${result.effective_radius_miles} miles, where every place fits, then sorted by distance.`]
@@ -525,11 +522,11 @@ function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
     <p>${
       !raw.trim()
         ? "No filter, so everything inside the circle counts."
-        : raw.trim() === gate.where
-          ? "Every field name in the filter exists in the live layer, and nothing else is in it but values and basic SQL words."
+        : raw.trim() === gate.checked
+          ? "Every field name in the filter exists in the live layer, every quoted value of a coded field exists too, and nothing else is in it but values and basic SQL words."
           : `You wrote <code>${esc(raw)}</code>. Every field exists in the live layer; it was rewritten with the layer's exact spelling:`
     }</p>
-    ${raw.trim() && raw.trim() !== gate.where ? `<pre>${esc(gate.where)}</pre>` : ""}
+    ${raw.trim() && raw.trim() !== gate.checked ? `<pre>${esc(gate.checked)}</pre>` : ""}
     <h3>2. Sent to ArcGIS</h3>
     <pre>where = ${esc(where)}
 distance = ${esc(q.distance)} ${esc(q.units.replace("esriSRUnit_", "").toLowerCase())}s around ${esc(q.geometry)}</pre>

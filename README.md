@@ -17,7 +17,7 @@ The [demo](https://aashisho1o1.github.io/geoassist-mcp/) is a static page built 
 Things to try on it:
 
 - Pick a fire, then **Level I trauma**. A card shows how many Level I hospitals an exact `TRAUMA = 'LEVEL I'` filter finds nationwide, and how many it misses.
-- Open **Write your own filter** and try the typo. It is refused with "Did you mean 'TRAUMA'?" before anything is sent to ArcGIS.
+- Open **Write your own filter** and try the typo, or the value that isn't in the layer. Each is refused with "Did you mean 'TRAUMA'?" before anything is sent to ArcGIS.
 - Switch to **Schools → Has a shelter ID** to see which nearby schools have a shelter ID in the layer.
 - Open **How this answer was made** to see the exact query, with a link that runs it in the ArcGIS REST API.
 
@@ -25,7 +25,7 @@ Things to try on it:
 
 The hospital layer's `TRAUMA` field is free text with 60 distinct values. Level I alone is written 22 different ways: `LEVEL I`, `I`, `LEVEL 1`, `1`, `LEVEL I, PEDIATRIC I`, `PEDIATRIC LEVEL I`, `LEVEL I, PEDIACTRIC II` (a typo in the data), and more. When I checked on November 10, 2026, a filter for exactly `'LEVEL I'` found 123 open Level I hospitals in the US and missed 141.
 
-Those numbers come from the demo page's rule for "Level I": any value containing a standalone `I` or `1`. That rule counts pediatric-only Level I centers (`PEDIATRIC 1`) as Level I. It lives in `docs/app.js` and is not covered by the tests yet.
+Those numbers come from one rule for "Level I": any value containing a standalone `I` or `1`. That rule counts pediatric-only Level I centers (`PEDIATRIC 1`) as Level I. It lives in the server (`isLevelI` in `src/datasets.ts`), is covered by the tests, and is what `get_dataset_schema` returns as the `LEVEL_I` value group on the `TRAUMA` field. The demo page uses the same list.
 
 A query like that doesn't fail. It returns a shorter list, and nothing tells the reader that most of the answers are missing. So the server now sends the model the full list of values for coded fields, and its tool description tells the model to match every spelling, not a single `LIKE` pattern.
 
@@ -43,6 +43,7 @@ The model proposes and the server decides. There is no LLM call inside this serv
 
 - every field name must exist in the layer (a typo like `TRAUMMA` comes back with "Did you mean 'TRAUMA'?")
 - `;`, `--`, `/*`, and any word that is not a field or a basic SQL keyword are rejected
+- for coded fields (`STATUS`, `TRAUMA`, `HELIPAD`, `TYPE`, `OWNER`, `STATE`, `LEVEL_`), a quoted value in `FIELD = '...'` must exist in the layer. `TRAUMA = 'LEVEL ONE'` comes back with the nearest real value. In an `IN (...)` list, values that don't exist are allowed as long as one does, and the answer names the ones that matched nothing
 - radius is capped at 100 miles and results at 25
 
 I built it this way because a wrong answer here is worse than no answer. If the model guesses a field name, the old GeoAssist would quietly return an empty map, and someone might read that as "there is no hospital nearby." Here the guess is caught and the model gets a message it can fix.
@@ -54,6 +55,7 @@ A few other choices made with the person on the other end in mind:
 - An empty result tells the model to widen the search before concluding nothing is there.
 - Closed hospitals are left out by default (`STATUS = 'OPEN'`), since sending someone to a closed hospital is worse than a shorter list.
 - `get_dataset_schema` shows real values (for example `TRAUMA = 'LEVEL II'`), because one example teaches the format better than a description. For coded fields like `TRAUMA`, `HELIPAD`, and `STATUS` it lists every value in the layer.
+- The schema is read from the live layer and kept for one hour. If a value list fails to load, that schema is not kept, so the next call tries again.
 - A feature service returns at most its `maxRecordCount` rows per request (2,000 on these layers), in storage order rather than by distance. The server asks for that many. If a circle holds more, the rows returned would be an arbitrary subset, so the server searches for a smaller circle that fits under the cap and still holds enough results, then sorts by distance. If even that isn't possible, the answer says the list is not guaranteed to be the closest.
 - `total_in_radius` is a separate count of every match inside the radius that was asked for, so "the 10 closest" is never mistaken for "all 10". If the count request fails it is `null`, not 0.
 - `data_source` names the origin of the data, the account that hosts the layer, and the date the layer was last edited (read from the service each time the server starts). The same date is repeated in the notes.
@@ -72,6 +74,16 @@ Because there is no LLM inside, there is also no API key to protect and no cost 
 Dates are as checked on November 10, 2026. Only the cities layer is a Living Atlas item. The hospital and school layers are copies of HIFLD data that FEMA accounts host publicly. They are not marked authoritative on ArcGIS Online, and their owners can change or remove them.
 
 I looked for a current, authoritative replacement for hospitals. The Living Atlas layer "Hospitals Registered with Medicare" is newer, but it has no trauma level, helipad, bed count, or open/closed status, which are the fields this tool is about. So the tool keeps the HIFLD copy and says how old it is in every answer.
+
+## The shared core
+
+`src/core.ts` exports the parts that are not specific to MCP: the dataset list, the schema reader, the filter gate (`checkFilter`, `checkFields`, `checkOrderBy`), and the distance search. It uses no Node-only API. Three things import it:
+
+- the MCP tools in `src/tools.ts`
+- the live demo page (as `docs/lib/core.js`)
+- the [GeoAssist](https://github.com/Aashisho1o1/GeoAssist) web app, which installs this repository as a dependency and imports `geoassist-hazard-proximity/core`
+
+So the checks are written and tested once.
 
 ## Setup
 
@@ -131,10 +143,11 @@ npm run inspect
 - The school layer is a snapshot too, not live status.
 - Coverage is the US only, since the layers used here are US datasets.
 - The "in the US" test for hazards is a set of rough bounding boxes. Events just across the Canadian or Mexican border can appear in the list, and events in Guam or the far western Aleutians are left out.
-- The filter check looks at field names and SQL shape, not values. A filter with a real field and a value that doesn't exist in the layer (`STATUS = 'open'`) passes and returns nothing.
+- Values are checked only for the coded fields listed above, and only in `=` and `IN` comparisons. `LIKE` patterns, numbers, and other text fields (for example `CITY = 'Springfeld'`) are not checked, so a misspelled value there still returns nothing without an explanation.
+- The value check ignores letter case and trailing spaces, because that is how these layers compare text (`STATUS = 'open'` matches `OPEN`). A layer that compares text exactly would need a stricter check.
 
 ## Tests
 
-`npm test` runs the server end to end through a real MCP client with ArcGIS and EONET mocked, so it works offline. It covers distance sorting, the where gate, field suggestions, US filtering, polygon events, the open-only default, the full value lists for coded fields, the dense-area radius search, the data-source block, and the total count.
+`npm test` runs the server end to end through a real MCP client with ArcGIS and EONET mocked, so it works offline. It covers distance sorting, the where gate, field suggestions, US filtering, polygon events, the open-only default, the full value lists for coded fields, the dense-area radius search, the data-source block, the total count, the value check, the Level I rule, and schema cache expiry.
 
 GitHub Actions runs the tests on every push and pull request, and fails if `docs/lib/` does not match what `npm run build:demo` produces from `src/`.

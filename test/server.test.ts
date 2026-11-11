@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildServer } from "../src/tools.js";
-import { checkWhere, applyOpenOnly } from "../src/where.js";
+import { checkWhere, applyOpenOnly, checkValues, checkOrderBy } from "../src/where.js";
+import { checkFilter, getSchema } from "../src/core.js";
 import { latestPoint, inUS } from "../src/eonet.js";
 import { clearSchemaCache } from "../src/arcgis.js";
-import { DATASETS } from "../src/datasets.js";
+import { DATASETS, isLevelI } from "../src/datasets.js";
 
 const HOSPITAL_FIELDS = ["OBJECTID", "NAME", "ADDRESS", "CITY", "STATE", "TELEPHONE", "STATUS", "BEDS", "TRAUMA", "HELIPAD"];
 
@@ -138,6 +139,7 @@ test("where gate", () => {
     ok: true,
     where: "BEDS > 100 AND STATE IN ('CA','NV')",
     fields: ["BEDS", "STATE"],
+    comparisons: [{ field: "STATE", negated: false, values: ["CA", "NV"] }],
   });
   assert.equal(checkWhere("", f).ok, true);
   assert.equal(checkWhere("NAME = 'x'; DROP TABLE t", f).ok, false);
@@ -398,4 +400,182 @@ test("asks for as many rows as the layer allows, not a fixed 200", async () => {
   assert.equal(r.fetch_cap, 2000);
   const list = calls.find((u) => u.searchParams.get("geometryType") && !u.searchParams.get("returnCountOnly"))!;
   assert.equal(list.searchParams.get("resultRecordCount"), "2000");
+});
+
+// ---- shared core: values, value groups, cache ----
+
+const comparisonsOf = (where: string, fields: string[]) => {
+  const r = checkWhere(where, fields);
+  assert.ok(r.ok, where);
+  return r.ok ? r.comparisons : [];
+};
+
+test("the gate records which quoted values each field is compared with", () => {
+  const f = ["NAME", "STATUS", "TRAUMA", "BEDS"];
+  assert.deepEqual(comparisonsOf("status = 'OPEN' and trauma not in ('I', 'O''NEIL')", f), [
+    { field: "STATUS", negated: false, values: ["OPEN"] },
+    { field: "TRAUMA", negated: true, values: ["I", "O'NEIL"] },
+  ]);
+  assert.deepEqual(comparisonsOf("STATUS <> 'CLOSED'", f), [{ field: "STATUS", negated: true, values: ["CLOSED"] }]);
+  // Patterns, numbers and function calls are not value comparisons.
+  assert.deepEqual(comparisonsOf("NAME LIKE '%MERCY%' AND BEDS = 100 AND UPPER(NAME) = 'X'", f), []);
+});
+
+const SCHEMA = [
+  { name: "STATUS", examples: ["CLOSED", "OPEN"], all_values: true },
+  { name: "TRAUMA", examples: ["LEVEL I", "LEVEL II", "I"], all_values: true },
+  { name: "NAME", examples: ["Sample Hospital"] },
+];
+const valuesOf = (where: string) => checkValues(comparisonsOf(where, ["STATUS", "TRAUMA", "NAME"]), SCHEMA);
+
+test("a value that is not in a coded field is refused, with the nearest real one", () => {
+  const r = valuesOf("STATUS = 'OPENED'");
+  assert.equal(r.ok, false);
+  assert.match((r as { error: string }).error, /'OPENED' is not a value of STATUS/);
+  assert.match((r as { error: string }).error, /Did you mean 'OPEN'\?/);
+  assert.match((r as { error: string }).error, /'CLOSED', 'OPEN'/);
+  assert.equal(valuesOf("TRAUMA IN ('LEVEL ONE', 'FIRST')").ok, false);
+});
+
+test("value check matches the way the layer compares text", () => {
+  // The service ignores letter case and trailing spaces, so these do match rows.
+  assert.deepEqual(valuesOf("STATUS = 'open'"), { ok: true, warnings: [] });
+  assert.deepEqual(valuesOf("STATUS = 'OPEN '"), { ok: true, warnings: [] });
+});
+
+test("an IN list with some unknown values runs, and says which matched nothing", () => {
+  const r = valuesOf("TRAUMA IN ('LEVEL I', 'LEVEL  I', 'I')");
+  assert.equal(r.ok, true);
+  assert.equal((r as { warnings: string[] }).warnings.length, 1);
+  assert.match((r as { warnings: string[] }).warnings[0], /'LEVEL  I' is not a value of TRAUMA/);
+});
+
+test("value check leaves alone what it cannot judge", () => {
+  assert.equal(valuesOf("NAME = 'ANYTHING'").ok, true); // full value list not known
+  assert.equal(valuesOf("STATUS <> 'BOGUS'").ok, true); // excluding a missing value changes nothing
+  assert.equal(valuesOf("STATUS NOT IN ('BOGUS')").ok, true);
+  assert.equal(valuesOf("TRAUMA LIKE 'LEVEL ONE%'").ok, true); // patterns are not checked
+});
+
+test("ORDER BY accepts only fields with ASC or DESC", () => {
+  const f = ["NAME", "BEDS"];
+  assert.deepEqual(checkOrderBy("beds desc, name", f), { ok: true, orderBy: "BEDS DESC, NAME" });
+  assert.deepEqual(checkOrderBy("", f), { ok: true, orderBy: "" });
+  assert.equal(checkOrderBy("BEDZ DESC", f).ok, false);
+  assert.equal(checkOrderBy("BEDS DESC NULLS LAST", f).ok, false);
+  assert.equal(checkOrderBy("BEDS; DROP TABLE t", f).ok, false);
+});
+
+test("Level I rule: standalone I or 1, never II, III or IV", () => {
+  for (const v of ["LEVEL I", "I", "LEVEL 1", "1", "LEVEL I, PEDIATRIC II", "PEDIATRIC LEVEL I", "I,PEDIATRIC I", "PEDIATRIC 1"]) {
+    assert.equal(isLevelI(v), true, v);
+  }
+  for (const v of ["LEVEL II", "LEVEL III", "IV", "II, III PEDIATRIC", "NOT AVAILABLE", "LEVEL 2", "AREA", "LEVEL IV"]) {
+    assert.equal(isLevelI(v), false, v);
+  }
+});
+
+// A layer whose coded fields have known value lists.
+function codedFetch(opts: { failDistinct?: () => boolean } = {}) {
+  const calls: URL[] = [];
+  const lists: Record<string, string[]> = {
+    TRAUMA: ["LEVEL I", "LEVEL II", "I", "PEDIATRIC 1", "NOT AVAILABLE"],
+    STATUS: ["OPEN", "CLOSED"],
+    HELIPAD: ["Y", "N"],
+  };
+  const fn = (async (input: string | URL) => {
+    const url = String(input);
+    const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200 });
+    if (url.endsWith("?f=json")) return json(layerJson);
+    const u = new URL(url);
+    calls.push(u);
+    if (u.searchParams.get("returnDistinctValues")) {
+      if (opts.failDistinct?.()) return new Response("boom", { status: 500 });
+      const field = u.searchParams.get("outFields")!;
+      return json({ features: (lists[field] ?? []).map((v) => ({ attributes: { [field]: v } })) });
+    }
+    if (u.searchParams.get("returnCountOnly")) return json({ count: 2 });
+    if (u.searchParams.get("geometryType")) return json(nearbyJson);
+    return json(sampleJson);
+  }) as typeof fetch;
+  return { fn, calls };
+}
+
+test("schema names the Level I spellings as a value group", async () => {
+  globalThis.fetch = codedFetch().fn;
+  const r = body(await (await connect()).callTool({ name: "get_dataset_schema", arguments: { dataset: "hospitals" } }));
+  const trauma = r.fields.find((f: any) => f.name === "TRAUMA");
+  assert.deepEqual(trauma.value_groups.LEVEL_I.values, ["I", "LEVEL I", "PEDIATRIC 1"]);
+  assert.match(trauma.value_groups.LEVEL_I.description, /children only/);
+});
+
+test("find_nearby refuses a value that is not in the layer before asking ArcGIS", async () => {
+  const { fn, calls } = codedFetch();
+  globalThis.fetch = fn;
+  const r: any = await (await connect()).callTool({
+    name: "find_nearby",
+    arguments: { dataset: "hospitals", latitude: 34.1, longitude: -117.7, where: "TRAUMA = 'LEVEL ONE'" },
+  });
+  assert.equal(r.isError, true);
+  assert.match(r.content[0].text, /'LEVEL ONE' is not a value of TRAUMA/);
+  assert.ok(!calls.some((u) => u.searchParams.get("geometryType")), "nothing should be sent to ArcGIS");
+});
+
+test("find_nearby passes on a warning for IN values that matched nothing", async () => {
+  globalThis.fetch = codedFetch().fn;
+  const r = body(
+    await (await connect()).callTool({
+      name: "find_nearby",
+      arguments: { dataset: "hospitals", latitude: 34.1, longitude: -117.7, where: "TRAUMA IN ('LEVEL I', 'LEVEL  I')" },
+    }),
+  );
+  assert.ok(r.notes.some((n: string) => n.includes("'LEVEL  I' is not a value of TRAUMA")));
+  assert.equal(r.query_sent.where, "(TRAUMA IN ('LEVEL I', 'LEVEL  I')) AND STATUS = 'OPEN'");
+});
+
+test("checkFilter runs shape, values and the open-only rule in one call", async () => {
+  globalThis.fetch = codedFetch().fn;
+  const schema = await getSchema(DATASETS.hospitals);
+  assert.deepEqual(checkFilter(DATASETS.hospitals, schema, "helipad = 'Y'"), {
+    ok: true,
+    where: "(HELIPAD = 'Y') AND STATUS = 'OPEN'",
+    checked: "HELIPAD = 'Y'",
+    openOnlyApplied: true,
+    warnings: [],
+  });
+  assert.equal(checkFilter(DATASETS.hospitals, schema, "HELIPAD = 'YES'").ok, false);
+  assert.equal(checkFilter(DATASETS.hospitals, schema, "HELIPADD = 'Y'").ok, false);
+  const noOpen = checkFilter(DATASETS.hospitals, schema, "", { openOnly: false });
+  assert.equal(noOpen.ok && noOpen.where, "1=1");
+});
+
+test("a schema whose value lists failed to load is not remembered", async () => {
+  let fail = true;
+  const { fn, calls } = codedFetch({ failDistinct: () => fail });
+  globalThis.fetch = fn;
+  const first = await getSchema(DATASETS.hospitals);
+  assert.notEqual(first.find((f) => f.name === "STATUS")?.all_values, true);
+
+  fail = false;
+  const second = await getSchema(DATASETS.hospitals);
+  assert.equal(second.find((f) => f.name === "STATUS")?.all_values, true);
+
+  // Now complete, so the third call is served from the cache.
+  const before = calls.length;
+  await getSchema(DATASETS.hospitals);
+  assert.equal(calls.length, before);
+});
+
+test("a cached schema expires after an hour", async (t) => {
+  const { fn, calls } = codedFetch();
+  globalThis.fetch = fn;
+  t.mock.timers.enable({ apis: ["Date"] });
+  await getSchema(DATASETS.hospitals);
+  const before = calls.length;
+  t.mock.timers.tick(59 * 60 * 1000);
+  await getSchema(DATASETS.hospitals);
+  assert.equal(calls.length, before);
+  t.mock.timers.tick(2 * 60 * 1000);
+  await getSchema(DATASETS.hospitals);
+  assert.ok(calls.length > before);
 });

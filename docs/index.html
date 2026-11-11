@@ -50,7 +50,7 @@
           <summary>Write your own filter</summary>
           <p class="small">
             This is the same check the AI model's filters go through. Field names must exist in the live layer,
-            and anything that isn't a field or a basic SQL word is refused before it reaches ArcGIS.
+            quoted values of coded fields must exist too, and anything that isn't a field or a basic SQL word is refused before it reaches ArcGIS.
           </p>
           <form id="customForm" class="custom-row">
             <input id="customWhere" type="text" spellcheck="false" autocomplete="off"
@@ -60,6 +60,7 @@
           <div class="try">
             Try: <button type="button" class="link" data-try="TRAUMMA = 'LEVEL I'">a typo</button>
             · <button type="button" class="link" data-try="NAME = 'x'; DROP TABLE hospitals">an injection</button>
+            · <button type="button" class="link" data-try="TRAUMA = 'LEVEL ONE'">a value that isn't in the layer</button>
             · <button type="button" class="link" data-try="BEDS >= 300 AND HELIPAD = 'Y'">big hospitals with a helipad</button>
           </div>
         </details>

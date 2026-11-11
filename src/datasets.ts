@@ -19,6 +19,11 @@ export interface Dataset {
   contactFields: string[];
   // A short note shown with every result so nobody treats the data as live.
   caveat: string;
+  // Text fields with a small, fixed set of values. The server reads every
+  // value of these from the layer, so filters can be checked against them.
+  codedFields: string[];
+  // Named sets of values that mean the same thing in a messy coded field.
+  valueGroups?: ValueGroup[];
   // Where the data comes from and who hosts this copy.
   source: {
     origin: string;
@@ -28,6 +33,20 @@ export interface Dataset {
   };
 }
 
+export interface ValueGroup {
+  field: string;
+  name: string;
+  description: string;
+  matches: (value: string) => boolean;
+}
+
+// TRAUMA is free text: 'LEVEL I', 'I', 'LEVEL 1', 'LEVEL I, PEDIATRIC II',
+// 'PEDIATRIC LEVEL I' all name a Level I center. Split on anything that isn't
+// a letter or digit and look for a standalone I or 1, which never matches II,
+// III, or IV.
+export const isLevelI = (value: string) =>
+  value.toUpperCase().split(/[^A-Z0-9]+/).some((t) => t === "I" || t === "1");
+
 export const DATASETS: Record<DatasetId, Dataset> = {
   hospitals: {
     id: "hospitals",
@@ -36,6 +55,17 @@ export const DATASETS: Record<DatasetId, Dataset> = {
     description:
       "About 7,500 US hospitals with beds, trauma level, helipad, owner, status, and phone.",
     contactFields: ["NAME", "ADDRESS", "CITY", "STATE", "TELEPHONE", "STATUS"],
+    codedFields: ["TRAUMA", "HELIPAD", "STATUS", "TYPE", "OWNER", "STATE"],
+    valueGroups: [
+      {
+        field: "TRAUMA",
+        name: "LEVEL_I",
+        description:
+          "Every spelling that names a Level I trauma center: any value with a standalone I or 1. " +
+          "Includes centers that are Level I for children only (for example 'PEDIATRIC 1') and mixed designations (for example 'LEVEL I, PEDIATRIC II').",
+        matches: isLevelI,
+      },
+    ],
     caveat:
       "Hospital status, beds, and phone numbers come from an old public snapshot of HIFLD data (its date is given with every answer), not a live or authoritative feed. A hospital listed as open may have closed. Call ahead before sending anyone. In an emergency, call 911.",
     source: {
@@ -52,6 +82,7 @@ export const DATASETS: Record<DatasetId, Dataset> = {
     description:
       "100,000+ US public schools with level, enrollment, grades, teachers, and phone.",
     contactFields: ["NAME", "ADDRESS", "CITY", "STATE", "TELEPHONE", "ENROLLMENT"],
+    codedFields: ["LEVEL_", "STATE", "TYPE", "STATUS"],
     caveat:
       "School records come from a public copy of HIFLD data (its date is given with every answer). Enrollment and contact details may lag the current school year. Confirm with the district.",
     source: {
@@ -67,6 +98,7 @@ export const DATASETS: Record<DatasetId, Dataset> = {
     url: "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/USA_Major_Cities_/FeatureServer/0",
     description: "Major US cities with population and household counts.",
     contactFields: ["NAME", "STATE_ABBR", "POPULATION"],
+    codedFields: ["CAPITAL", "CLASS", "STATE_ABBR"],
     caveat: "City populations in this layer come from US Census estimates.",
     source: {
       origin: "USA Major Cities (Esri; US Census Bureau)",

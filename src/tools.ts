@@ -3,7 +3,8 @@ import { z } from "zod";
 import { DATASETS, DATASET_IDS } from "./datasets.js";
 import { getSchema, findNearby, getDataSource } from "./arcgis.js";
 import { listHazards, getHazard, inUS, HAZARD_CATEGORIES } from "./eonet.js";
-import { checkWhere, checkFields, applyOpenOnly } from "./where.js";
+import { checkFields } from "./where.js";
+import { checkFilter } from "./core.js";
 
 const MAX_RADIUS = 100;
 const MAX_LIMIT = 25;
@@ -83,7 +84,8 @@ export function buildServer(): McpServer {
         "Hospitals, schools, or cities within a radius of an EONET event or a lat/lon point, closest first, " +
         "with an optional where filter (for example HELIPAD = 'Y'). Coded fields such as TRAUMA are spelled many ways " +
         "('LEVEL I', 'I', 'LEVEL 1', 'PEDIATRIC LEVEL I', ...): get_dataset_schema lists every value, so filter with " +
-        "IN (...) over all the spellings that match, not a single LIKE pattern. " +
+        "IN (...) over all the spellings that match, not a single LIKE pattern. Where the schema gives a value_groups entry " +
+        "(for example LEVEL_I on TRAUMA), use its values. A quoted value that does not exist in a coded field is refused. " +
         "Returns the exact query sent to ArcGIS so the person can see what was asked. " +
         "total_in_radius is the number of matches inside the radius asked for; results is only the closest few. " +
         "data_source says who hosts the layer and when it was last edited: tell the person if it is old.",
@@ -114,17 +116,17 @@ export function buildServer(): McpServer {
           return fail("Give either event_id or both latitude and longitude.");
         }
 
-        // 2. Check the model's filter and fields against the live schema.
-        const names = (await getSchema(ds)).map((f) => f.name);
-        const where = checkWhere(args.where, names);
-        if (!where.ok) return fail(where.error);
+        // 2. Check the model's filter and fields against the live schema:
+        //    field names, SQL shape, values of coded fields. Then leave closed
+        //    facilities out by default (hospitals).
+        const schema = await getSchema(ds);
+        const names = schema.map((f) => f.name);
+        const filter = checkFilter(ds, schema, args.where, { openOnly: args.open_only });
+        if (!filter.ok) return fail(filter.error);
         const fields = checkFields(args.out_fields, names, ds.contactFields);
         if (!fields.ok) return fail(fields.error);
-
-        // 3. Filter open facilities by default for emergency safety (e.g. hospitals).
-        const open = args.open_only ? applyOpenOnly(ds.id, where) : { where: where.where, applied: false };
-        const effectiveWhere = open.where;
-        const filteredOpen = open.applied;
+        const effectiveWhere = filter.where;
+        const filteredOpen = filter.openOnlyApplied;
 
         // 4. Run it.
         const result = await findNearby(ds, {
@@ -150,6 +152,7 @@ export function buildServer(): McpServer {
               ? `This layer was last edited on ${dataSource.layer_last_edited}. Anything that changed after that date is not in it.`
               : "This layer does not report when it was last edited, so its age is unknown.",
             "Distances are straight-line miles, not driving distance.",
+            ...filter.warnings,
             ...(filteredOpen
               ? ["Filtered to open facilities (STATUS = 'OPEN') by default. To include closed facilities, set open_only: false or specify STATUS in the where clause."]
               : []),

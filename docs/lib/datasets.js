@@ -60,7 +60,7 @@ export const DATASETS = {
         description: "100,000+ US public schools with level, enrollment, grades, teachers, and phone.",
         contactFields: ["NAME", "ADDRESS", "CITY", "STATE", "TELEPHONE", "ENROLLMENT"],
         codedFields: ["LEVEL_", "STATE", "TYPE", "STATUS"],
-        caveat: "School records come from a public copy of HIFLD data for the 2022-2023 school year (the date the copy was last edited is given with every answer). Enrollment and contact details may lag the current school year. The layer also holds schools that are closed, inactive, or not yet open (STATUS other than '1'), and nothing filters them out. Confirm with the district.",
+        caveat: "School records come from a public copy of HIFLD data for the 2022-2023 school year (the date the copy was last edited is given with every answer). Enrollment and contact details may lag the current school year. STATUS codes '1', '3', '4', '5' and '8' are operational schools. The layer also holds schools that are closed ('2'), temporarily closed ('6') or not yet open ('7'), and nothing filters them out. Confirm with the district.",
         source: {
             origin: "Homeland Infrastructure Foundation-Level Data (HIFLD) Public Schools, from NCES Common Core of Data",
             hosted_by: "FEMA (ArcGIS Online account FEMA_HQ_Preparedness_NIC)",

@@ -15,7 +15,7 @@ const TOKEN = /\s+|'(?:[^']|'')*'|-?\d+(?:\.\d+)?|<=|>=|<>|!=|[=<>(),]|[A-Za-z_]
 export function checkWhere(raw, fields) {
     const where = (raw ?? "").trim();
     if (where === "")
-        return { ok: true, where: "1=1", fields: [], comparisons: [], hasOr: false, hasNot: false };
+        return { ok: true, where: "1=1", fields: [], comparisons: [], hasOr: false, hasNot: false, unread: [] };
     if (where.length > MAX_LENGTH) {
         return { ok: false, error: `WHERE clause is longer than ${MAX_LENGTH} characters. Simplify the filter.` };
     }
@@ -33,6 +33,9 @@ export function checkWhere(raw, fields) {
     let prev = "";
     let prev2 = "";
     const comparisons = [];
+    // Every field reference, and the ones a recorded shape accounted for.
+    const refs = [];
+    const read = [];
     let scan = { at: "none" };
     let hasOr = false;
     let hasNot = false;
@@ -60,6 +63,7 @@ export function checkWhere(raw, fields) {
             else if (byUpper.has(upper)) {
                 tok = byUpper.get(upper); // canonical field spelling
                 used.add(tok);
+                refs.push(tok);
                 isField = true;
             }
             else {
@@ -79,16 +83,20 @@ export function checkWhere(raw, fields) {
                 hasNot = true;
             prev2 = prev;
             prev = tok;
-            scan = step(scan, tok, isField, comparisons);
+            scan = step(scan, tok, isField, comparisons, read);
         }
     }
     if (depth !== 0)
         return { ok: false, error: "Unbalanced parentheses." };
-    return { ok: true, where: out.trim(), fields: [...used], comparisons, hasOr, hasNot };
+    const count = (list, f) => list.filter((x) => x === f).length;
+    const unread = [...used].filter((f) => count(refs, f) > count(read, f));
+    return { ok: true, where: out.trim(), fields: [...used], comparisons, hasOr, hasNot, unread };
 }
 // Advance the comparison scan by one token, recording a comparison when a
-// "FIELD = 'x'", "'x' = FIELD" or "FIELD IN ('x', ...)" shape completes.
-function step(scan, tok, isField, found) {
+// "FIELD = 'x'", "'x' = FIELD" or "FIELD IN ('x', ...)" shape completes. Each
+// field reference a shape accounts for (those, and FIELD IS [NOT] NULL) is
+// added to `read`.
+function step(scan, tok, isField, found, read) {
     const fresh = isField
         ? { at: "field", field: tok }
         : FUNCTIONS.has(tok)
@@ -106,7 +114,16 @@ function step(scan, tok, isField, found) {
                 return { at: "not", field: scan.field };
             if (tok === "IN")
                 return { at: "in", field: scan.field, negated: false, open: false, values: [] };
+            if (tok === "IS")
+                return { at: "is", field: scan.field };
             return fresh;
+        case "is":
+            // IS stays in this state across NOT, so IS NOT NULL reads like IS NULL.
+            if (tok === "NOT")
+                return scan;
+            if (tok === "NULL")
+                read.push(scan.field);
+            return tok === "NULL" ? { at: "none" } : fresh;
         case "not":
             if (tok === "IN")
                 return { at: "in", field: scan.field, negated: true, open: false, values: [] };
@@ -115,6 +132,7 @@ function step(scan, tok, isField, found) {
             if (!isLiteral(tok))
                 return fresh;
             found.push({ field: scan.field, negated: scan.negated, values: [unquote(tok)] });
+            read.push(scan.field);
             return { at: "none" };
         case "in":
             if (!scan.open)
@@ -123,8 +141,10 @@ function step(scan, tok, isField, found) {
                 return { ...scan, values: [...scan.values, unquote(tok)] };
             if (tok === ",")
                 return scan;
-            if (tok === ")" && scan.values.length)
+            if (tok === ")" && scan.values.length) {
                 found.push({ field: scan.field, negated: scan.negated, values: scan.values });
+                read.push(scan.field);
+            }
             return tok === ")" ? { at: "none" } : fresh;
         case "fn":
             return tok === "(" ? { at: "fnOpen" } : fresh;
@@ -142,6 +162,7 @@ function step(scan, tok, isField, found) {
             if (!isField)
                 return fresh;
             found.push({ field: tok, negated: scan.negated, values: [scan.value] });
+            read.push(tok);
             return { at: "none" };
         default:
             return fresh;
@@ -219,10 +240,21 @@ export function checkOrderBy(raw, fields) {
 // STATUS <> 'OPEN'. Merely naming the field (STATUS IS NOT NULL) does not
 // switch the rule off. Decided from the comparisons the gate parsed, not the
 // raw text, so a value like NAME LIKE '%STATUS%' can't switch it off either.
+// If the filter uses STATUS in a form the gate can't read (STATUS LIKE 'C%',
+// (STATUS) = 'CLOSED'), adding STATUS = 'OPEN' could turn a valid filter into
+// an empty one, so the rule is left off and `note` says why.
 // "Open" means marked OPEN in the layer's snapshot, not open today.
 export function applyOpenOnly(datasetId, check) {
     if (datasetId !== "hospitals")
         return { where: check.where, applied: false };
+    const unreadStatus = (check.unread ?? []).find((f) => f.toUpperCase() === "STATUS");
+    if (unreadStatus) {
+        return {
+            where: check.where,
+            applied: false,
+            note: `The filter uses ${unreadStatus} in a form this check can't read, so hospitals not marked OPEN were not left out. To keep only open ones, add AND ${unreadStatus} = 'OPEN'.`,
+        };
+    }
     const status = (check.comparisons ?? []).filter((c) => c.field.toUpperCase() === "STATUS");
     const isOpen = (v) => fold(v) === "OPEN";
     const asksForOther = status.some((c) => (c.negated ? c.values.some(isOpen) : !c.values.every(isOpen))) ||

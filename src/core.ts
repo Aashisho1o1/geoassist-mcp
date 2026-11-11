@@ -12,7 +12,7 @@ import { applyOpenOnly, checkValues, checkWhere } from "./where.js";
 
 export { DATASETS, DATASET_IDS, isLevelI, isAdultLevelI } from "./datasets.js";
 export type { Dataset, DatasetId, ValueGroup } from "./datasets.js";
-export { getSchema, getLayerInfo, getDataSource, findNearby, clearSchemaCache, milesBetween } from "./arcgis.js";
+export { getSchema, getLayerInfo, getDataSource, findNearby, clearSchemaCache, milesBetween, arcgisRequest, MAX_GET_URL } from "./arcgis.js";
 export type { FieldInfo, LayerInfo, NearbyQuery, NearbyResult } from "./arcgis.js";
 export { checkWhere, checkValues, checkFields, checkOrderBy, applyOpenOnly } from "./where.js";
 export type { WhereCheck, ValueCheck, FieldCheck, OrderCheck, Comparison } from "./where.js";
@@ -28,7 +28,8 @@ export type FilterCheck =
       // added, or the filter already said STATUS = 'OPEN'.
       openOnlyApplied: boolean;
       // Values that don't exist in the layer but did not make the filter empty,
-      // and values that could not be checked.
+      // values that could not be checked, and why the open-only rule was left
+      // off when the filter uses STATUS in a form the gate can't read.
       warnings: string[];
     }
   | { ok: false; error: string };
@@ -46,5 +47,6 @@ export function checkFilter(
   const values = checkValues(shape.comparisons, schema, !shape.hasOr && !shape.hasNot);
   if (!values.ok) return values;
   const open = options.openOnly === false ? { where: shape.where, applied: false } : applyOpenOnly(ds.id, shape);
-  return { ok: true, where: open.where, checked: shape.where, openOnlyApplied: open.applied, warnings: values.warnings };
+  const warnings = "note" in open && open.note ? [...values.warnings, open.note] : values.warnings;
+  return { ok: true, where: open.where, checked: shape.where, openOnlyApplied: open.applied, warnings };
 }

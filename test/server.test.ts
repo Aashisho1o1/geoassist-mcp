@@ -7,7 +7,7 @@ import { checkWhere, applyOpenOnly, checkValues, checkOrderBy } from "../src/whe
 import { isAdultLevelI } from "../src/datasets.js";
 import { checkFilter, getSchema } from "../src/core.js";
 import { latestPoint, inUS } from "../src/eonet.js";
-import { clearSchemaCache } from "../src/arcgis.js";
+import { clearSchemaCache, arcgisRequest, MAX_GET_URL } from "../src/arcgis.js";
 import { DATASETS, isLevelI } from "../src/datasets.js";
 
 const HOSPITAL_FIELDS = ["OBJECTID", "NAME", "ADDRESS", "CITY", "STATE", "TELEPHONE", "STATUS", "BEDS", "TRAUMA", "HELIPAD"];
@@ -149,6 +149,8 @@ test("where gate", () => {
     comparisons: [{ field: "STATE", negated: false, values: ["CA", "NV"] }],
     hasOr: false,
     hasNot: false,
+    // BEDS > 100 is a range, not a recorded comparison.
+    unread: ["BEDS"],
   });
   assert.equal(checkWhere("", f).ok, true);
   assert.equal(checkWhere("NAME = 'x'; DROP TABLE t", f).ok, false);
@@ -203,12 +205,61 @@ test("open-only rule is decided by what the filter asks of STATUS, not by text",
   assert.equal(open("BEDS > 5 OR STATUS = 'CLOSED'").applied, false);
   // Naming the field without asking for another status does not.
   assert.deepEqual(open("STATUS IS NOT NULL"), { where: "(STATUS IS NOT NULL) AND STATUS = 'OPEN'", applied: true });
-  assert.equal(open("STATUS = STATUS").where, "(STATUS = STATUS) AND STATUS = 'OPEN'");
   assert.equal(open("STATUS <> 'UNKNOWN'").where, "(STATUS <> 'UNKNOWN') AND STATUS = 'OPEN'");
   assert.equal(open("BEDS > 5 OR STATUS = 'OPEN'").where, "(BEDS > 5 OR STATUS = 'OPEN') AND STATUS = 'OPEN'");
   // Already limited to OPEN: nothing is added, and the answer still says so.
   assert.deepEqual(open("BEDS > 5 AND status = 'open'"), { where: "BEDS > 5 AND STATUS = 'open'", applied: true });
   assert.equal(applyOpenOnly("schools", { where: "1=1" }).applied, false);
+});
+
+test("open-only rule stays off, with a note, when STATUS is used in a form the gate can't read", () => {
+  const f = ["NAME", "STATUS", "BEDS"];
+  const open = (w: string) => {
+    const r = checkWhere(w, f);
+    assert.ok(r.ok, w);
+    return applyOpenOnly("hospitals", r as Extract<typeof r, { ok: true }>);
+  };
+  // Each of these matches 354 closed hospitals live. Adding STATUS = 'OPEN'
+  // would turn them into an empty answer.
+  for (const w of [
+    "STATUS LIKE 'C%'",
+    "(STATUS) = 'CLOSED'",
+    "UPPER(UPPER(STATUS)) = 'CLOSED'",
+    "STATUS IN (('CLOSED'))",
+    "STATUS BETWEEN 'A' AND 'D'",
+    "STATUS NOT LIKE 'O%'",
+    "STATUS = STATUS",
+    // One unread use is enough, even next to a readable one.
+    "STATUS = 'OPEN' AND STATUS LIKE 'O%'",
+  ]) {
+    const r = open(w);
+    assert.equal(r.applied, false, w);
+    assert.equal(r.where, checkWhere(w, f).ok && (checkWhere(w, f) as { where: string }).where, w);
+    assert.match(r.note ?? "", /in a form this check can't read.*add AND STATUS = 'OPEN'/, w);
+  }
+  // IS NULL and IS NOT NULL are read, so they keep the rule on.
+  assert.equal(open("STATUS IS NULL").applied, true);
+  assert.equal(open("STATUS IS NOT NULL").where, "(STATUS IS NOT NULL) AND STATUS = 'OPEN'");
+  // Readable forms are unchanged.
+  assert.equal(open("UPPER(STATUS) = 'CLOSED'").applied, false);
+  assert.equal(open("UPPER(STATUS) = 'CLOSED'").note, undefined);
+  assert.equal(open("'CLOSED' = STATUS").applied, false);
+  assert.equal(open("NAME LIKE 'A%'").where, "(NAME LIKE 'A%') AND STATUS = 'OPEN'");
+});
+
+test("unread lists fields the comparison scan could not account for", () => {
+  const f = ["NAME", "STATUS", "BEDS"];
+  const unread = (w: string) => {
+    const r = checkWhere(w, f);
+    assert.ok(r.ok, w);
+    return r.ok ? r.unread : [];
+  };
+  assert.deepEqual(unread("STATUS = 'OPEN' AND NAME IN ('A','B')"), []);
+  assert.deepEqual(unread("'A' = NAME AND LOWER(STATUS) <> 'x'"), []);
+  assert.deepEqual(unread("NAME IS NULL AND STATUS IS NOT NULL"), []);
+  assert.deepEqual(unread("NAME LIKE 'A%'"), ["NAME"]);
+  assert.deepEqual(unread("STATUS IN ('A', 1)"), ["STATUS"]);
+  assert.deepEqual(unread("NAME = 'A' AND NAME LIKE 'B%'"), ["NAME"]);
 });
 
 test("polygon events use the average of the outer ring", () => {
@@ -598,17 +649,20 @@ test("Level I rule: standalone I or 1, never II, III or IV", () => {
 // A layer whose coded fields have known value lists.
 function codedFetch(opts: { failDistinct?: () => boolean } = {}) {
   const calls: URL[] = [];
+  const methods: string[] = [];
   const lists: Record<string, string[]> = {
     TRAUMA: ["LEVEL I", "LEVEL II", "I", "PEDIATRIC 1", "NOT AVAILABLE"],
     STATUS: ["OPEN", "CLOSED"],
     HELIPAD: ["Y", "N"],
   };
-  const fn = (async (input: string | URL) => {
-    const url = String(input);
+  const fn = (async (input: string | URL, init?: RequestInit) => {
+    // A POST carries the same parameters in its body.
+    const url = init?.method === "POST" ? `${String(input)}?${String(init.body)}` : String(input);
     const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200 });
     if (url.endsWith("?f=json")) return json(layerJson);
     const u = new URL(url);
     calls.push(u);
+    methods.push(init?.method ?? "GET");
     if (u.searchParams.get("returnDistinctValues")) {
       if (opts.failDistinct?.()) return new Response("boom", { status: 500 });
       const field = u.searchParams.get("outFields")!;
@@ -618,8 +672,37 @@ function codedFetch(opts: { failDistinct?: () => boolean } = {}) {
     if (u.searchParams.get("geometryType")) return json(nearbyJson);
     return json(sampleJson);
   }) as typeof fetch;
-  return { fn, calls };
+  return { fn, calls, methods };
 }
+
+test("a request URL over the GET limit is sent as a POST with the same parameters", () => {
+  const short = "https://x.test/query?where=1%3D1&f=json";
+  assert.deepEqual(arcgisRequest(short), { url: short, init: {} });
+  const params = new URLSearchParams({ where: `NAME = '${"&".repeat(700)}'`, f: "json" });
+  const long = `https://x.test/query?${params}`;
+  assert.ok(long.length > MAX_GET_URL);
+  const r = arcgisRequest(long);
+  assert.equal(r.url, "https://x.test/query");
+  assert.equal(r.init.method, "POST");
+  assert.equal(new URLSearchParams(String(r.init.body)).get("where"), params.get("where"));
+});
+
+test("find_nearby with a long filter sends its queries as POST", async () => {
+  const { fn, calls, methods } = codedFetch();
+  globalThis.fetch = fn;
+  const where = `NAME = '${"&".repeat(900)}'`;
+  const r: any = await (await connect()).callTool({
+    name: "find_nearby",
+    arguments: { dataset: "hospitals", latitude: 34, longitude: -117, where },
+  });
+  assert.notEqual(r.isError, true);
+  const spatial = calls.map((u, i) => ({ u, m: methods[i] })).filter(({ u }) => u.searchParams.get("geometryType"));
+  assert.ok(spatial.length >= 2);
+  for (const { u, m } of spatial) {
+    assert.equal(m, "POST");
+    assert.equal(u.searchParams.get("where"), `(${where}) AND STATUS = 'OPEN'`);
+  }
+});
 
 test("schema names the Level I spellings as a value group", async () => {
   globalThis.fetch = codedFetch().fn;
@@ -681,6 +764,12 @@ test("checkFilter runs shape, values and the open-only rule in one call", async 
   // OR keeps the filter alive, so the unknown value is reported, not refused.
   const or = checkFilter(DATASETS.hospitals, schema, "HELIPAD = 'YES' OR STATUS = 'OPEN'");
   assert.equal(or.ok && or.warnings.length, 1);
+  // An unreadable STATUS use leaves the filter as written and says why in the warnings.
+  const like = checkFilter(DATASETS.hospitals, schema, "STATUS LIKE 'C%'");
+  assert.ok(like.ok);
+  assert.equal(like.ok && like.where, "STATUS LIKE 'C%'");
+  assert.equal(like.ok && like.openOnlyApplied, false);
+  assert.match(like.ok ? like.warnings.join(" ") : "", /were not left out/);
   // The core's messages do not name an MCP tool; the MCP layer adds that.
   for (const w of ["HELIPAD = 'YES'", "HELIPADD = 'Y'", "HELIPAD IN ()"]) {
     const r = checkFilter(DATASETS.hospitals, schema, w);

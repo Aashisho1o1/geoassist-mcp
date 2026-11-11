@@ -7,7 +7,7 @@
 // it runs unchanged in a browser.
 import { applyOpenOnly, checkValues, checkWhere } from "./where.js";
 export { DATASETS, DATASET_IDS, isLevelI, isAdultLevelI } from "./datasets.js";
-export { getSchema, getLayerInfo, getDataSource, findNearby, clearSchemaCache, milesBetween } from "./arcgis.js";
+export { getSchema, getLayerInfo, getDataSource, findNearby, clearSchemaCache, milesBetween, arcgisRequest, MAX_GET_URL } from "./arcgis.js";
 export { checkWhere, checkValues, checkFields, checkOrderBy, applyOpenOnly } from "./where.js";
 // The whole gate in one call: field names and SQL shape, then values of coded
 // fields, then the open-only default. A filter that fails any step is never sent.
@@ -19,5 +19,6 @@ export function checkFilter(ds, schema, raw, options = {}) {
     if (!values.ok)
         return values;
     const open = options.openOnly === false ? { where: shape.where, applied: false } : applyOpenOnly(ds.id, shape);
-    return { ok: true, where: open.where, checked: shape.where, openOnlyApplied: open.applied, warnings: values.warnings };
+    const warnings = "note" in open && open.note ? [...values.warnings, open.note] : values.warnings;
+    return { ok: true, where: open.where, checked: shape.where, openOnlyApplied: open.applied, warnings };
 }

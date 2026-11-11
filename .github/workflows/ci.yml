@@ -24,4 +24,7 @@ jobs:
       # The live demo runs the compiled server modules committed in docs/lib.
       # Fail if they no longer match what src/ builds to.
       - run: npm run build:demo
-      - run: git diff --exit-code -- docs/lib
+      # git status also sees a new, untracked file that git diff would miss.
+      - run: test -z "$(git status --porcelain -- docs/lib)" || (git status --porcelain -- docs/lib; exit 1)
+      # Every module the demo imports must have been copied.
+      - run: node -e "import('./docs/lib/core.js')"

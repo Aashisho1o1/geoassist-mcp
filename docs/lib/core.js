@@ -6,7 +6,7 @@
 // Nothing in this file or the modules it re-exports uses a Node-only API, so
 // it runs unchanged in a browser.
 import { applyOpenOnly, checkValues, checkWhere } from "./where.js";
-export { DATASETS, DATASET_IDS, isLevelI } from "./datasets.js";
+export { DATASETS, DATASET_IDS, isLevelI, isAdultLevelI } from "./datasets.js";
 export { getSchema, getLayerInfo, getDataSource, findNearby, clearSchemaCache, milesBetween } from "./arcgis.js";
 export { checkWhere, checkValues, checkFields, checkOrderBy, applyOpenOnly } from "./where.js";
 // The whole gate in one call: field names and SQL shape, then values of coded
@@ -15,7 +15,7 @@ export function checkFilter(ds, schema, raw, options = {}) {
     const shape = checkWhere(raw, schema.map((f) => f.name));
     if (!shape.ok)
         return shape;
-    const values = checkValues(shape.comparisons, schema);
+    const values = checkValues(shape.comparisons, schema, !shape.hasOr && !shape.hasNot);
     if (!values.ok)
         return values;
     const open = options.openOnly === false ? { where: shape.where, applied: false } : applyOpenOnly(ds.id, shape);

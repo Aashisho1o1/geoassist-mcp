@@ -10,7 +10,7 @@ import type { Dataset } from "./datasets.js";
 import type { FieldInfo } from "./arcgis.js";
 import { applyOpenOnly, checkValues, checkWhere } from "./where.js";
 
-export { DATASETS, DATASET_IDS, isLevelI } from "./datasets.js";
+export { DATASETS, DATASET_IDS, isLevelI, isAdultLevelI } from "./datasets.js";
 export type { Dataset, DatasetId, ValueGroup } from "./datasets.js";
 export { getSchema, getLayerInfo, getDataSource, findNearby, clearSchemaCache, milesBetween } from "./arcgis.js";
 export type { FieldInfo, LayerInfo, NearbyQuery, NearbyResult } from "./arcgis.js";
@@ -24,9 +24,11 @@ export type FilterCheck =
       where: string;
       // The filter as checked, before the open-only rule was added.
       checked: string;
-      // True when STATUS = 'OPEN' was added because the filter didn't mention STATUS.
+      // True when the answer is limited to hospitals marked OPEN: the rule was
+      // added, or the filter already said STATUS = 'OPEN'.
       openOnlyApplied: boolean;
-      // Values in an IN list that don't exist in the layer.
+      // Values that don't exist in the layer but did not make the filter empty,
+      // and values that could not be checked.
       warnings: string[];
     }
   | { ok: false; error: string };
@@ -41,7 +43,7 @@ export function checkFilter(
 ): FilterCheck {
   const shape = checkWhere(raw, schema.map((f) => f.name));
   if (!shape.ok) return shape;
-  const values = checkValues(shape.comparisons, schema);
+  const values = checkValues(shape.comparisons, schema, !shape.hasOr && !shape.hasNot);
   if (!values.ok) return values;
   const open = options.openOnly === false ? { where: shape.where, applied: false } : applyOpenOnly(ds.id, shape);
   return { ok: true, where: open.where, checked: shape.where, openOnlyApplied: open.applied, warnings: values.warnings };

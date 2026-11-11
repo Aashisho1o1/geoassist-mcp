@@ -47,6 +47,18 @@ export interface ValueGroup {
 export const isLevelI = (value: string) =>
   value.toUpperCase().split(/[^A-Z0-9]+/).some((t) => t === "I" || t === "1");
 
+// Level I for adults: the same rule, but a part of the value that names
+// children ('PEDIATRIC I', 'I PEDIATRIC') does not count unless it also says
+// ADULT. Parts are separated by commas. The data misspells PEDIATRIC, so the
+// test is the prefix PEDIA.
+export const isAdultLevelI = (value: string) =>
+  value.toUpperCase().split(",").some((part) => {
+    const tokens = part.split(/[^A-Z0-9]+/);
+    const one = tokens.some((t) => t === "I" || t === "1");
+    const child = tokens.some((t) => t.startsWith("PEDIA"));
+    return one && (!child || tokens.includes("ADULT"));
+  });
+
 export const DATASETS: Record<DatasetId, Dataset> = {
   hospitals: {
     id: "hospitals",
@@ -64,6 +76,13 @@ export const DATASETS: Record<DatasetId, Dataset> = {
           "Every spelling that names a Level I trauma center: any value with a standalone I or 1. " +
           "Includes centers that are Level I for children only (for example 'PEDIATRIC 1') and mixed designations (for example 'LEVEL I, PEDIATRIC II').",
         matches: isLevelI,
+      },
+      {
+        field: "TRAUMA",
+        name: "LEVEL_I_ADULT",
+        description:
+          "The LEVEL_I spellings that name a Level I center for adults. Leaves out values that are Level I for children only (for example 'PEDIATRIC 1').",
+        matches: isAdultLevelI,
       },
     ],
     caveat:
@@ -84,7 +103,7 @@ export const DATASETS: Record<DatasetId, Dataset> = {
     contactFields: ["NAME", "ADDRESS", "CITY", "STATE", "TELEPHONE", "ENROLLMENT"],
     codedFields: ["LEVEL_", "STATE", "TYPE", "STATUS"],
     caveat:
-      "School records come from a public copy of HIFLD data (its date is given with every answer). Enrollment and contact details may lag the current school year. Confirm with the district.",
+      "School records come from a public copy of HIFLD data for the 2022-2023 school year (the date the copy was last edited is given with every answer). Enrollment and contact details may lag the current school year. The layer also holds schools that are closed, inactive, or not yet open (STATUS other than '1'), and nothing filters them out. Confirm with the district.",
     source: {
       origin: "Homeland Infrastructure Foundation-Level Data (HIFLD) Public Schools, from NCES Common Core of Data",
       hosted_by: "FEMA (ArcGIS Online account FEMA_HQ_Preparedness_NIC)",
@@ -96,10 +115,10 @@ export const DATASETS: Record<DatasetId, Dataset> = {
     id: "cities",
     name: "US Major Cities",
     url: "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/USA_Major_Cities_/FeatureServer/0",
-    description: "Major US cities with population and household counts.",
+    description: "About 4,200 US cities with population, population density, and a state capital flag.",
     contactFields: ["NAME", "STATE_ABBR", "POPULATION"],
     codedFields: ["CAPITAL", "CLASS", "STATE_ABBR"],
-    caveat: "City populations in this layer come from US Census estimates.",
+    caveat: "City populations in this layer are 2020 Census counts.",
     source: {
       origin: "USA Major Cities (Esri; US Census Bureau)",
       hosted_by: "Esri (ArcGIS Living Atlas, account esri_dm)",

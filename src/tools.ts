@@ -85,7 +85,7 @@ export function buildServer(): McpServer {
         "with an optional where filter (for example HELIPAD = 'Y'). Coded fields such as TRAUMA are spelled many ways " +
         "('LEVEL I', 'I', 'LEVEL 1', 'PEDIATRIC LEVEL I', ...): get_dataset_schema lists every value, so filter with " +
         "IN (...) over all the spellings that match, not a single LIKE pattern. Where the schema gives a value_groups entry " +
-        "(for example LEVEL_I on TRAUMA), use its values. A quoted value that does not exist in a coded field is refused. " +
+        "(for example LEVEL_I on TRAUMA), use its values. A value that does not exist in a coded field is refused when it is written as FIELD = 'x' or FIELD IN (...) and the filter has no OR or NOT; otherwise it comes back as a warning in notes. " +
         "Returns the exact query sent to ArcGIS so the person can see what was asked. " +
         "total_in_radius is the number of matches inside the radius asked for; results is only the closest few. " +
         "data_source says who hosts the layer and when it was last edited: tell the person if it is old.",
@@ -95,9 +95,9 @@ export function buildServer(): McpServer {
         latitude: z.number().min(-90).max(90).optional(),
         longitude: z.number().min(-180).max(180).optional(),
         radius_miles: z.number().positive().max(MAX_RADIUS).default(25),
-        where: z.string().optional().describe("Optional SQL-style filter using only fields from get_dataset_schema."),
-        open_only: z.boolean().default(true).describe("If true (default), automatically filters out closed facilities when supported by the dataset."),
-        out_fields: z.array(z.string()).optional().describe("Extra fields to return. Name and contact fields are always included."),
+        where: z.string().max(1000).optional().describe("Optional SQL-style filter using only fields from get_dataset_schema."),
+        open_only: z.boolean().default(true).describe("Hospitals only. If true (default), leaves out hospitals not marked OPEN in the layer's snapshot, unless the where filter itself asks for another STATUS value (for example STATUS = 'CLOSED'). Set false to include every status. Has no effect on schools or cities."),
+        out_fields: z.array(z.string().max(64)).max(30).optional().describe("Extra fields to return. Name and contact fields are always included."),
         limit: z.number().int().min(1).max(MAX_LIMIT).default(10),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -122,7 +122,7 @@ export function buildServer(): McpServer {
         const schema = await getSchema(ds);
         const names = schema.map((f) => f.name);
         const filter = checkFilter(ds, schema, args.where, { openOnly: args.open_only });
-        if (!filter.ok) return fail(filter.error);
+        if (!filter.ok) return fail(`${filter.error} Call get_dataset_schema to see the valid fields and values.`);
         const fields = checkFields(args.out_fields, names, ds.contactFields);
         if (!fields.ok) return fail(fields.error);
         const effectiveWhere = filter.where;
@@ -154,7 +154,7 @@ export function buildServer(): McpServer {
             "Distances are straight-line miles, not driving distance.",
             ...filter.warnings,
             ...(filteredOpen
-              ? ["Filtered to open facilities (STATUS = 'OPEN') by default. To include closed facilities, set open_only: false or specify STATUS in the where clause."]
+              ? ["Limited to hospitals marked OPEN in this snapshot (STATUS = 'OPEN'). To include closed hospitals, set open_only: false or filter on STATUS = 'CLOSED'."]
               : []),
             ...(result.effective_radius_miles < args.radius_miles && result.closest_guaranteed
               ? [`This area is dense, so the search used a ${result.effective_radius_miles}-mile circle: small enough to fetch every place inside it, which guarantees these are the closest ones.`]

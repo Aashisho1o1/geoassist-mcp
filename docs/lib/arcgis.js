@@ -90,7 +90,9 @@ export async function getSchema(ds) {
             })}`);
             const vals = (distinct.features ?? [])
                 .map((feat) => feat.attributes?.[f.name])
-                .filter((v) => v !== null && v !== undefined && v !== "")
+                // Null is dropped (= never matches it). An empty string is kept:
+                // it is a real value that FIELD = '' matches.
+                .filter((v) => v !== null && v !== undefined)
                 .map(String);
             if (vals.length > 0) {
                 f.examples = [...new Set(vals)].sort().slice(0, MAX_DISTINCT);
@@ -99,7 +101,9 @@ export async function getSchema(ds) {
             }
         }
         catch {
-            // Keep the sampled values for this answer, but don't remember them.
+            // Keep the sampled values for this answer, but don't remember them,
+            // and say that values of this field are not being checked.
+            f.values_unavailable = true;
             complete = false;
         }
     }));

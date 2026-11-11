@@ -7,6 +7,9 @@ export interface FieldInfo {
   examples: string[];
   // True when examples is the complete list of values in the layer.
   all_values?: boolean;
+  // True when the full value list was asked for and could not be read, so
+  // values of this field are not being checked.
+  values_unavailable?: boolean;
   // Named sets of values that mean the same thing (see ValueGroup).
   value_groups?: Record<string, { description: string; values: string[] }>;
 }
@@ -123,7 +126,9 @@ export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
           );
           const vals: string[] = (distinct.features ?? [])
             .map((feat: any) => feat.attributes?.[f.name])
-            .filter((v: unknown) => v !== null && v !== undefined && v !== "")
+            // Null is dropped (= never matches it). An empty string is kept:
+            // it is a real value that FIELD = '' matches.
+            .filter((v: unknown) => v !== null && v !== undefined)
             .map(String);
           if (vals.length > 0) {
             f.examples = [...new Set(vals)].sort().slice(0, MAX_DISTINCT);
@@ -131,7 +136,9 @@ export async function getSchema(ds: Dataset): Promise<FieldInfo[]> {
             f.all_values = vals.length <= MAX_DISTINCT && !distinct.exceededTransferLimit;
           }
         } catch {
-          // Keep the sampled values for this answer, but don't remember them.
+          // Keep the sampled values for this answer, but don't remember them,
+          // and say that values of this field are not being checked.
+          f.values_unavailable = true;
           complete = false;
         }
       }),

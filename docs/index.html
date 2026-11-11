@@ -50,7 +50,7 @@
           <summary>Write your own filter</summary>
           <p class="small">
             This is the same check the AI model's filters go through. Field names must exist in the live layer,
-            quoted values of coded fields must exist too, and anything that isn't a field or a basic SQL word is refused before it reaches ArcGIS.
+            a value compared with = or IN on a coded field must exist too, and anything that isn't a field or a basic SQL word is refused before it reaches ArcGIS.
           </p>
           <form id="customForm" class="custom-row">
             <input id="customWhere" type="text" spellcheck="false" autocomplete="off"
@@ -88,7 +88,7 @@
           </p>
           <p>
             So this version never lets the model's guess run unchecked. Every filter is checked against the live
-            layer first, closed hospitals are left out by default, and every answer shows the exact query it ran.
+            layer first, hospitals the data marks as closed are left out by default, and every answer shows the exact query it ran.
             The map you're using runs the same code as the
             <a href="https://github.com/Aashisho1o1/geoassist-mcp">MCP server</a> that Claude Desktop or Cursor can call.
           </p>
@@ -99,7 +99,8 @@
             <li>NASA EONET gives one point per event, not a fire perimeter or storm footprint.</li>
             <li>Distances are straight-line miles, not driving distance or evacuation routes.</li>
             <li>Hospital and school records are old public snapshots of HIFLD data, not live status or capacity. The date each layer was last edited is shown under the results.</li>
-            <li>US only. In an emergency, call 911.</li>
+            <li>"Open" means marked open in that snapshot. A hospital may have closed since.</li>
+            <li>US only, and the test for "in the US" is a set of rough boxes, so an event just across the Canadian or Mexican border can appear in the list. In an emergency, call 911.</li>
           </ul>
         </details>
         <p class="links">

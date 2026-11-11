@@ -27,6 +27,10 @@ export type FilterCheck =
       // True when the answer is limited to hospitals marked OPEN: the rule was
       // added, or the filter already said STATUS = 'OPEN'.
       openOnlyApplied: boolean;
+      // True when the rule was left off because the filter uses STATUS in a
+      // form the gate can't read. A note in warnings says so; callers can add
+      // advice that fits their audience.
+      statusUnread: boolean;
       // Values that don't exist in the layer but did not make the filter empty,
       // values that could not be checked, and why the open-only rule was left
       // off when the filter uses STATUS in a form the gate can't read.
@@ -46,7 +50,15 @@ export function checkFilter(
   if (!shape.ok) return shape;
   const values = checkValues(shape.comparisons, schema, !shape.hasOr && !shape.hasNot);
   if (!values.ok) return values;
-  const open = options.openOnly === false ? { where: shape.where, applied: false } : applyOpenOnly(ds.id, shape);
-  const warnings = "note" in open && open.note ? [...values.warnings, open.note] : values.warnings;
-  return { ok: true, where: open.where, checked: shape.where, openOnlyApplied: open.applied, warnings };
+  const open: ReturnType<typeof applyOpenOnly> =
+    options.openOnly === false ? { where: shape.where, applied: false } : applyOpenOnly(ds.id, shape);
+  const warnings = open.note ? [...values.warnings, open.note] : values.warnings;
+  return {
+    ok: true,
+    where: open.where,
+    checked: shape.where,
+    openOnlyApplied: open.applied,
+    statusUnread: Boolean(open.statusUnread),
+    warnings,
+  };
 }

@@ -259,6 +259,7 @@ h1 { margin: 4px 0 6px; font-size: 26px; line-height: 1.15; letter-spacing: -0.0
 .place .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
 .tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--soft); color: var(--muted); }
 .tag.good { color: var(--ok); }
+.tag.bad { color: var(--err); font-weight: 600; }
 .dist { font-weight: 700; font-size: 14px; white-space: nowrap; }
 .dist small { display: block; font-weight: 400; color: var(--muted); font-size: 11px; text-align: right; }
 .phone { color: var(--accent); text-decoration: none; font-size: 13px; }

@@ -19,6 +19,13 @@ export function checkFilter(ds, schema, raw, options = {}) {
     if (!values.ok)
         return values;
     const open = options.openOnly === false ? { where: shape.where, applied: false } : applyOpenOnly(ds.id, shape);
-    const warnings = "note" in open && open.note ? [...values.warnings, open.note] : values.warnings;
-    return { ok: true, where: open.where, checked: shape.where, openOnlyApplied: open.applied, warnings };
+    const warnings = open.note ? [...values.warnings, open.note] : values.warnings;
+    return {
+        ok: true,
+        where: open.where,
+        checked: shape.where,
+        openOnlyApplied: open.applied,
+        statusUnread: Boolean(open.statusUnread),
+        warnings,
+    };
 }

@@ -96,7 +96,7 @@ export function buildServer(): McpServer {
         longitude: z.number().min(-180).max(180).optional(),
         radius_miles: z.number().positive().max(MAX_RADIUS).default(25),
         where: z.string().max(1000).optional().describe("Optional SQL-style filter using only fields from get_dataset_schema."),
-        open_only: z.boolean().default(true).describe("Hospitals only. If true (default), leaves out hospitals not marked OPEN in the layer's snapshot, unless the where filter itself asks for another STATUS value (for example STATUS = 'CLOSED') or uses STATUS in a form the check can't read (STATUS LIKE 'C%'); the answer's warnings say when that happened. Set false to include every status. Has no effect on schools or cities."),
+        open_only: z.boolean().default(true).describe("Hospitals only. If true (default), leaves out hospitals not marked OPEN in the layer's snapshot, unless the where filter itself asks for another STATUS value (for example STATUS = 'CLOSED') or uses STATUS in a form the check can't read (STATUS LIKE 'C%', STATUS IS NULL), which the answer's notes say. Set false to include every status. Has no effect on schools or cities."),
         out_fields: z.array(z.string().max(64)).max(30).optional().describe("Extra fields to return. Name and contact fields are always included."),
         limit: z.number().int().min(1).max(MAX_LIMIT).default(10),
       },
@@ -153,6 +153,9 @@ export function buildServer(): McpServer {
               : "This layer does not report when it was last edited, so its age is unknown.",
             "Distances are straight-line miles, not driving distance.",
             ...filter.warnings,
+            ...(filter.statusUnread
+              ? [`To keep only open hospitals, send the filter as (${filter.checked}) AND STATUS = 'OPEN'.`]
+              : []),
             ...(filteredOpen
               ? ["Limited to hospitals marked OPEN in this snapshot (STATUS = 'OPEN'). To include closed hospitals, set open_only: false or filter on STATUS = 'CLOSED'."]
               : []),

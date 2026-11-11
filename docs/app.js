@@ -3,7 +3,7 @@
 // the radius search, and the EONET handling are the exact code an AI client
 // reaches through MCP. Only the map and the page are new.
 
-import { DATASETS, getSchema, findNearby, getDataSource, checkFilter, checkFields } from "./lib/core.js";
+import { DATASETS, getSchema, findNearby, getDataSource, checkFilter, checkFields, MAX_GET_URL } from "./lib/core.js";
 import { listHazards, inUS } from "./lib/eonet.js";
 
 const [EsriMap, MapView, Basemap, TileLayer, GraphicsLayer, Graphic, Circle, Point] = await new Promise((resolve) =>
@@ -45,7 +45,7 @@ const PRESETS = {
 
 const EXTRA_FIELDS = {
   hospitals: ["TYPE", "TRAUMA", "HELIPAD", "BEDS"],
-  schools: ["LEVEL_", "ST_GRADE", "END_GRADE", "SHELTER_ID"],
+  schools: ["LEVEL_", "ST_GRADE", "END_GRADE", "SHELTER_ID", "STATUS"],
 };
 
 // Every spelling of a Level I center, as worked out (and tested) by the
@@ -61,6 +61,7 @@ const state = {
   category: "wildfires",
   hazards: [],
   center: null, // { latitude, longitude, label, hazardId? }
+  hazardsLoading: false,
   ds: "hospitals",
   preset: "all",
   custom: null,
@@ -121,9 +122,15 @@ const view = new MapView({
 const FIRE = dark ? [255, 122, 61] : [217, 72, 15];
 const ACCENT = dark ? [111, 178, 242] : [11, 92, 173];
 
+// The listed hazards, plus the selected one if the list now shows another type.
+function shownHazards() {
+  const h = state.center?.hazard;
+  return h && !state.hazards.some((x) => x.id === h.id) ? [...state.hazards, h] : state.hazards;
+}
+
 function drawHazards() {
   hazardLayer.removeAll();
-  for (const h of state.hazards) {
+  for (const h of shownHazards()) {
     const selected = state.center?.hazardId === h.id;
     hazardLayer.add(
       new Graphic({
@@ -219,7 +226,7 @@ view.on("click", async (event) => {
   const hit = await view.hitTest(event, { include: [hazardLayer, placeLayer] });
   const g = hit.results[0]?.graphic;
   if (g?.attributes?.hazardId) {
-    const h = state.hazards.find((x) => x.id === g.attributes.hazardId);
+    const h = shownHazards().find((x) => x.id === g.attributes.hazardId);
     if (h) selectHazard(h);
     return;
   }
@@ -247,19 +254,25 @@ async function loadHazards(category, { autoselect = false } = {}) {
   const token = ++hazardToken;
   state.category = category;
   for (const b of $("categoryTabs").children) b.setAttribute("aria-selected", String(b.dataset.cat === category));
-  $("hazardList").innerHTML = `<li class="empty">Loading open events from NASA EONET…</li>`;
+  // Clear the old type's list now, so nothing redraws it under the new tab.
+  state.hazards = [];
+  state.hazardsLoading = true;
+  renderHazardList();
+  drawHazards();
   let hazards;
   try {
     hazards = await listHazards(category, 30);
   } catch (e) {
     if (token !== hazardToken) return null;
     state.hazards = [];
+    state.hazardsLoading = false;
     $("hazardList").innerHTML = `<li class="empty">Couldn't reach NASA EONET (${esc(e.message)}). You can still click the map.</li>`;
     drawHazards();
     return false;
   }
   if (token !== hazardToken) return null;
   state.hazards = hazards;
+  state.hazardsLoading = false;
   renderHazardList();
   drawHazards();
   // Don't move the map if the person already picked a point while this loaded.
@@ -273,6 +286,10 @@ async function loadHazards(category, { autoselect = false } = {}) {
 
 function renderHazardList() {
   const list = $("hazardList");
+  if (state.hazardsLoading) {
+    list.innerHTML = `<li class="empty">Loading open events from NASA EONET…</li>`;
+    return;
+  }
   if (!state.hazards.length) {
     const name = $("categoryTabs").querySelector(`[data-cat="${state.category}"]`).textContent.toLowerCase();
     list.innerHTML = `<li class="empty">NASA EONET lists no open ${esc(name)} in the US in the last 30 days. Try another type, or click the map.</li>`;
@@ -437,8 +454,18 @@ async function run({ zoom = false } = {}) {
   }
 }
 
+// School STATUS codes that mean not operating (NCES Common Core of Data).
+const SCHOOL_NOT_OPEN = { 2: "Marked closed", 6: "Marked temporarily closed", 7: "Not yet open" };
+
 function tags(a, dsId) {
   const t = [];
+  // A filter can ask for closed places, so say so on the card itself.
+  if (dsId === "hospitals" && known(a.STATUS) && String(a.STATUS).trim().toUpperCase() !== "OPEN") {
+    t.push({ text: `Marked ${String(a.STATUS).trim().toLowerCase()}`, bad: true });
+  }
+  if (dsId === "schools" && SCHOOL_NOT_OPEN[String(a.STATUS).trim()]) {
+    t.push({ text: SCHOOL_NOT_OPEN[String(a.STATUS).trim()], bad: true });
+  }
   if (dsId === "hospitals") {
     if (known(a.TRAUMA) && !/NOT DESIGNATED|NON-DESIGNATED|UNCLASSIFIED/i.test(a.TRAUMA)) t.push({ text: `Trauma: ${a.TRAUMA}`, good: true });
     if (a.HELIPAD === "Y") t.push({ text: "Helipad", good: true });
@@ -462,7 +489,9 @@ function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
   const what = ds.id === "hospitals" ? (n === 1 ? "hospital" : "hospitals") : n === 1 ? "school" : "schools";
   // A value the layer doesn't have is the likeliest reason for a short or
   // empty list, so say it next to the result, not only in the details below.
-  const warned = gate.warnings.length ? `<br /><span class="small"><strong>Check the filter:</strong> ${gate.warnings.map(esc).join(" ")}</span>` : "";
+  const advice = gate.statusUnread ? [`To keep only open hospitals, write (${gate.checked}) AND STATUS = 'OPEN'.`] : [];
+  const warnings = [...gate.warnings, ...advice];
+  const warned = warnings.length ? `<br /><span class="small"><strong>Check the filter:</strong> ${warnings.map(esc).join(" ")}</span>` : "";
   if (n === 0) {
     const wider = Math.min(100, state.radius * 2);
     setStatus(
@@ -505,7 +534,7 @@ function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
           <button class="link name" data-i="${i}" style="text-decoration:none;color:inherit;text-align:left">${esc(titleCase(a.NAME))}</button>
           <div class="meta">${esc(titleCase(a.ADDRESS))}, ${esc(titleCase(a.CITY))}, ${esc(a.STATE)}</div>
           <div>${phone}</div>
-          <div class="tags">${tags(a, ds.id).map((t) => `<span class="tag ${t.good ? "good" : ""}">${esc(t.text)}</span>`).join("")}</div>
+          <div class="tags">${tags(a, ds.id).map((t) => `<span class="tag ${t.good ? "good" : t.bad ? "bad" : ""}">${esc(t.text)}</span>`).join("")}</div>
         </div>
         <div class="dist">${r.distance_miles} mi<small>straight-line</small></div>
       </div></li>`;
@@ -524,7 +553,7 @@ function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
   const url = `${endpoint}?${new URLSearchParams(q)}`;
   const notes = [
     "Distances are straight-line miles, not driving distance.",
-    ...gate.warnings,
+    ...warnings,
     ...(filteredOpen ? ["Only hospitals marked OPEN in this snapshot are listed (STATUS = 'OPEN'). The snapshot is old, so that is not the same as open today."] : []),
     ...(!result.closest_guaranteed
       ? [`More than ${result.fetch_cap.toLocaleString()} places fall inside even a ${result.effective_radius_miles}-mile circle, and this layer returns at most ${result.fetch_cap.toLocaleString()} rows per request, in no particular order. The list is the closest of the rows that were read, so a nearer place may be missing.`]
@@ -554,7 +583,9 @@ function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
     <h3>2. Sent to ArcGIS</h3>
     <pre>where = ${esc(where)}
 distance = ${esc(q.distance)} ${esc(q.units.replace("esriSRUnit_", "").toLowerCase())}s around ${esc(q.geometry)}</pre>
-    <p><a href="${esc(url)}" target="_blank" rel="noopener">Open this exact query in the ArcGIS REST API</a></p>
+    ${url.length <= MAX_GET_URL
+      ? `<p><a href="${esc(url)}" target="_blank" rel="noopener">Open this exact query in the ArcGIS REST API</a></p>`
+      : `<p class="small">This query is too long for a link (ArcGIS Online refuses web addresses over about 2,000 characters), so it was sent as a POST with the parameters above.</p>`}
     <h3>3. Notes</h3>
     <ul>${notes.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
 }

@@ -125,23 +125,59 @@ function requiredTerms(tokens) {
         // Drop parentheses that wrap the whole term: ((STATUS = 'OPEN')).
         while (term.length > 2 && term[0].tok === "(" && closes(term) === term.length - 1)
             term = term.slice(1, -1);
-        if (!term.length || term[0].tok === "NOT")
-            continue;
-        const found = [];
-        let scan = { at: "none" };
-        let doneAt = -1;
-        term.forEach((t, i) => {
-            const before = found.length;
-            scan = step(scan, t.tok, t.isField, found, []);
-            if (found.length > before)
-                doneAt = i;
-        });
-        // The term is exactly one comparison: it ends on the token that completed it.
-        if (found.length === 1 && doneAt === term.length - 1 && term.filter((t) => t.isField).length === 1) {
-            required.push(found[0]);
-        }
+        const c = exactComparison(term);
+        if (c)
+            required.push(c);
     }
     return required;
+}
+// The comparison a term is, when the term is nothing but one comparison and
+// none of AND, OR, NOT or a constant can hide inside it. Only these shapes count:
+//   FIELD op 'x'        'x' op FIELD        FN(FIELD) op 'x'
+//   FIELD [NOT] IN ('x', ...)               FN(FIELD) [NOT] IN ('x', ...)
+// where op is =, <> or != and FN is UPPER or LOWER.
+function exactComparison(term) {
+    const t = term.map((x) => x.tok);
+    const lit = (i) => i < t.length && isLiteral(t[i]);
+    const opAt = (i) => (t[i] === "=" ? false : t[i] === "<>" || t[i] === "!=" ? true : undefined);
+    // 'x' op FIELD
+    if (t.length === 3 && lit(0) && term[2].isField && opAt(1) !== undefined) {
+        return { field: t[2], negated: opAt(1), values: [unquote(t[0])] };
+    }
+    // The field part: FIELD, or UPPER( FIELD ) / LOWER( FIELD ).
+    let field;
+    let i;
+    if (term[0]?.isField) {
+        field = t[0];
+        i = 1;
+    }
+    else if (FUNCTIONS.has(t[0]) && t[1] === "(" && term[2]?.isField && t[3] === ")") {
+        field = t[2];
+        i = 4;
+    }
+    else
+        return undefined;
+    // op 'x'
+    const neg = opAt(i);
+    if (neg !== undefined)
+        return t.length === i + 2 && lit(i + 1) ? { field, negated: neg, values: [unquote(t[i + 1])] } : undefined;
+    // [NOT] IN ( 'x' , 'y' ... )
+    const negated = t[i] === "NOT";
+    if (negated)
+        i++;
+    if (t[i] !== "IN" || t[i + 1] !== "(" || t[t.length - 1] !== ")")
+        return undefined;
+    const inner = t.slice(i + 2, -1);
+    if (inner.length === 0 || inner.length % 2 === 0)
+        return undefined;
+    const values = [];
+    for (let k = 0; k < inner.length; k++) {
+        if (k % 2 === 0 ? !isLiteral(inner[k]) : inner[k] !== ",")
+            return undefined;
+        if (k % 2 === 0)
+            values.push(unquote(inner[k]));
+    }
+    return { field, negated, values };
 }
 // Index of the parenthesis that closes the one at index 0.
 function closes(term) {

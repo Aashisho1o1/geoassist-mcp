@@ -154,7 +154,7 @@ export function buildServer(): McpServer {
             "Distances are straight-line miles, not driving distance.",
             ...filter.warnings,
             ...(filter.statusUnread
-              ? [`To keep only open hospitals, send the filter as (${filter.checked}) AND STATUS = 'OPEN'.`]
+              ? [`If only open hospitals were meant, send the filter as (${filter.checked}) AND STATUS = 'OPEN'.`]
               : []),
             ...(filteredOpen
               ? ["Limited to hospitals marked OPEN in this snapshot (STATUS = 'OPEN'). To include closed hospitals, set open_only: false or filter on STATUS = 'CLOSED'."]

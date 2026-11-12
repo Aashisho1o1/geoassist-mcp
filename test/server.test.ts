@@ -256,6 +256,9 @@ test("open-only rule stays off, with a note, when STATUS is used in a form the g
   ]) {
     assert.deepEqual(open(w), { where: checkWhere(w, f).ok ? (checkWhere(w, f) as { where: string }).where : "", applied: true }, w);
   }
+  // Hidden inside a wrapped term: the rule is still added.
+  assert.equal(open("(1 = 1 OR STATUS = 'OPEN')").where, "((1 = 1 OR STATUS = 'OPEN')) AND STATUS = 'OPEN'");
+  assert.equal(open("(1 = 1 AND NOT STATUS = 'OPEN')").applied, false);
   // Not at the top level, or under NOT: not required, so the usual rules apply.
   assert.equal(open("STATUS LIKE 'C%' OR NAME = 'X' AND STATUS = 'OPEN'").applied, false);
   assert.equal(open("NOT STATUS = 'OPEN' AND BEDS > 1").applied, false);
@@ -297,6 +300,22 @@ test("required lists the comparisons that are whole top-level AND terms", () => 
   assert.deepEqual(req("(STATUS = 'OPEN' OR BEDS > 1) AND NAME = 'X'"), ["NAME:X"]);
   assert.deepEqual(req("NOT STATUS = 'OPEN' AND NOT (NAME = 'X')"), []);
   assert.deepEqual(req("(STATUS) = 'OPEN' AND STATUS = NAME"), []);
+  // An OR, NOT, AND or constant hidden inside a wrapped term: not required.
+  // (1 = 1 OR STATUS = 'OPEN') matches 354 closed hospitals live, and
+  // (1 = 1 AND NOT STATUS = 'OPEN') matches only closed ones.
+  for (const w of [
+    "(1 = 1 OR STATUS = 'OPEN')",
+    "((1 = 1 OR STATUS = 'OPEN')) AND BEDS > 0",
+    "('A' = 'A' OR UPPER(STATUS) IN ('OPEN')) AND NAME = 'X'",
+    "(NULL IS NULL OR STATUS = 'OPEN')",
+    "(1 = 1 AND NOT STATUS = 'OPEN')",
+    "(1 = 1 AND NOT (STATUS = 'OPEN'))",
+    "(BEDS > 1 AND STATUS = 'OPEN')",
+    "STATUS = 'OPEN' = 'X'",
+  ]) {
+    assert.equal(req(w).filter((r) => r.startsWith("STATUS")).length, 0, w);
+  }
+  assert.deepEqual(req("STATUS NOT IN ('CLOSED') AND 'X' <> NAME"), ["!STATUS:CLOSED", "!NAME:X"]);
 });
 
 test("polygon events use the average of the outer ring", () => {
@@ -751,7 +770,7 @@ test("find_nearby with an unreadable STATUS use says so and gives the form that 
   const out = body(r);
   assert.equal(out.query_sent.where, "STATUS LIKE 'C%'");
   assert.ok(out.notes.some((n: string) => /not left out automatically/.test(n)));
-  assert.ok(out.notes.includes("To keep only open hospitals, send the filter as (STATUS LIKE 'C%') AND STATUS = 'OPEN'."));
+  assert.ok(out.notes.includes("If only open hospitals were meant, send the filter as (STATUS LIKE 'C%') AND STATUS = 'OPEN'."));
   assert.ok(!out.notes.some((n: string) => /^Limited to hospitals marked OPEN/.test(n)));
   assert.ok(calls.length > 0);
 });

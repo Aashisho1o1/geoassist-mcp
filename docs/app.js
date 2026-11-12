@@ -62,6 +62,7 @@ const state = {
   hazards: [],
   center: null, // { latitude, longitude, label, hazardId? }
   hazardsLoading: false,
+  hazardsError: null, // message when the last EONET request failed
   ds: "hospitals",
   preset: "all",
   custom: null,
@@ -266,13 +267,15 @@ async function loadHazards(category, { autoselect = false } = {}) {
     if (token !== hazardToken) return null;
     state.hazards = [];
     state.hazardsLoading = false;
-    $("hazardList").innerHTML = `<li class="empty">Couldn't reach NASA EONET (${esc(e.message)}). You can still click the map.</li>`;
+    state.hazardsError = e.message;
+    renderHazardList();
     drawHazards();
     return false;
   }
   if (token !== hazardToken) return null;
   state.hazards = hazards;
   state.hazardsLoading = false;
+  state.hazardsError = null;
   renderHazardList();
   drawHazards();
   // Don't move the map if the person already picked a point while this loaded.
@@ -288,6 +291,11 @@ function renderHazardList() {
   const list = $("hazardList");
   if (state.hazardsLoading) {
     list.innerHTML = `<li class="empty">Loading open events from NASA EONET…</li>`;
+    return;
+  }
+  // Kept in state, so a later redraw doesn't turn the error into "no events".
+  if (state.hazardsError) {
+    list.innerHTML = `<li class="empty">Couldn't reach NASA EONET (${esc(state.hazardsError)}). You can still click the map.</li>`;
     return;
   }
   if (!state.hazards.length) {
@@ -489,7 +497,7 @@ function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
   const what = ds.id === "hospitals" ? (n === 1 ? "hospital" : "hospitals") : n === 1 ? "school" : "schools";
   // A value the layer doesn't have is the likeliest reason for a short or
   // empty list, so say it next to the result, not only in the details below.
-  const advice = gate.statusUnread ? [`To keep only open hospitals, write (${gate.checked}) AND STATUS = 'OPEN'.`] : [];
+  const advice = gate.statusUnread ? [`If you meant only open hospitals, write (${gate.checked}) AND STATUS = 'OPEN'.`] : [];
   const warnings = [...gate.warnings, ...advice];
   const warned = warnings.length ? `<br /><span class="small"><strong>Check the filter:</strong> ${warnings.map(esc).join(" ")}</span>` : "";
   if (n === 0) {
@@ -575,7 +583,7 @@ function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
         : raw.trim() === gate.checked
           ? "Every field name in the filter exists in the live layer, and nothing else is in it but values and basic SQL words. " +
             (gate.warnings.length
-              ? "A value was not found in the layer; see the notes below."
+              ? "Some parts of it come with a warning; see the notes below."
               : "Values compared with = or IN on a coded field were checked against the layer's own list. LIKE patterns, ranges and negated values are not checked.")
           : `You wrote <code>${esc(raw)}</code>. Every field exists in the live layer; it was rewritten with the layer's exact spelling:`
     }</p>

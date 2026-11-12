@@ -5,7 +5,7 @@
 // guess turns into a corrected retry instead of a silent empty result.
 const KEYWORDS = new Set(["AND", "OR", "NOT", "LIKE", "IN", "IS", "NULL", "BETWEEN", "DATE", "TIMESTAMP"]);
 const FUNCTIONS = new Set(["UPPER", "LOWER"]);
-const MAX_LENGTH = 1000;
+export const MAX_WHERE_LENGTH = 1000;
 const isLiteral = (tok) => tok.startsWith("'");
 const unquote = (tok) => tok.slice(1, -1).replace(/''/g, "'");
 // A value as a SQL literal, so text in a message can be pasted back into a filter.
@@ -15,10 +15,10 @@ const TOKEN = /\s+|'(?:[^']|'')*'|-?\d+(?:\.\d+)?|<=|>=|<>|!=|[=<>(),]|[A-Za-z_]
 export function checkWhere(raw, fields) {
     const where = (raw ?? "").trim();
     if (where === "") {
-        return { ok: true, where: "1=1", fields: [], comparisons: [], hasOr: false, hasNot: false, unread: [], required: [] };
+        return { ok: true, where: "1=1", fields: [], comparisons: [], unread: [] };
     }
-    if (where.length > MAX_LENGTH) {
-        return { ok: false, error: `WHERE clause is longer than ${MAX_LENGTH} characters. Simplify the filter.` };
+    if (where.length > MAX_WHERE_LENGTH) {
+        return { ok: false, error: `WHERE clause is longer than ${MAX_WHERE_LENGTH} characters. Simplify the filter.` };
     }
     // Looked for outside quoted values only: a school named 'A--B' is a value, not a comment.
     const bare = where.replace(LITERAL, "''");
@@ -33,16 +33,7 @@ export function checkWhere(raw, fields) {
     // Last two non-space tokens, to catch an empty IN () list.
     let prev = "";
     let prev2 = "";
-    const comparisons = [];
-    // Every field reference, and the ones a recorded shape accounted for.
-    const refs = [];
-    const read = [];
-    // Non-space tokens with their parenthesis depth (a paren counts at the
-    // depth outside it), to find the top-level AND terms afterwards.
     const tokens = [];
-    let scan = { at: "none" };
-    let hasOr = false;
-    let hasNot = false;
     while (pos < where.length) {
         TOKEN.lastIndex = pos;
         const m = TOKEN.exec(where);
@@ -51,7 +42,6 @@ export function checkWhere(raw, fields) {
         }
         let tok = m[0];
         pos = TOKEN.lastIndex;
-        const outer = depth;
         if (tok === "(")
             depth++;
         if (tok === ")" && --depth < 0)
@@ -68,7 +58,6 @@ export function checkWhere(raw, fields) {
             else if (byUpper.has(upper)) {
                 tok = byUpper.get(upper); // canonical field spelling
                 used.add(tok);
-                refs.push(tok);
                 isField = true;
             }
             else {
@@ -82,63 +71,132 @@ export function checkWhere(raw, fields) {
         }
         out += tok;
         if (tok.trim()) {
-            if (tok === "OR")
-                hasOr = true;
-            if (tok === "NOT" && prev !== "IS" && scan.at !== "field")
-                hasNot = true;
             prev2 = prev;
             prev = tok;
-            tokens.push({ tok, isField, depth: tok === ")" ? depth : outer });
-            scan = step(scan, tok, isField, comparisons, read);
+            tokens.push({ tok, isField });
         }
     }
     if (depth !== 0)
         return { ok: false, error: "Unbalanced parentheses." };
-    const count = (list, f) => list.filter((x) => x === f).length;
-    const unread = [...used].filter((f) => count(refs, f) > count(read, f));
-    return { ok: true, where: out.trim(), fields: [...used], comparisons, hasOr, hasNot, unread, required: requiredTerms(tokens) };
+    const comparisons = [];
+    const unread = new Set();
+    const tree = readStructure(tokens);
+    if (tree)
+        readConditions(tree, false, true, comparisons, unread);
+    else
+        for (const f of used)
+            unread.add(f);
+    return { ok: true, where: out.trim(), fields: [...used], comparisons, unread: [...unread] };
 }
-// Comparisons that make up a whole top-level AND term on their own, so every
-// row the filter matches meets them. With an OR at the top level, no single
-// term is required. The AND of a top-level BETWEEN is not a split point.
-function requiredTerms(tokens) {
-    const top = tokens.filter((t) => t.depth === 0);
-    if (top.some((t) => t.tok === "OR"))
-        return [];
-    const terms = [[]];
-    let between = false;
-    for (const t of tokens) {
-        if (t.depth === 0 && t.tok === "BETWEEN")
-            between = true;
-        if (t.depth === 0 && t.tok === "AND") {
-            if (between)
-                between = false;
-            else {
-                terms.push([]);
-                continue;
-            }
+// Reads the structure with SQL precedence (NOT, then AND, then OR). A NOT
+// counts here only where a condition could start, so the NOT of NOT IN,
+// NOT LIKE, NOT BETWEEN and IS NOT NULL stays inside its condition. Returns
+// undefined when the tokens don't form such a structure (STATE = 'CA' AND):
+// the filter still goes to ArcGIS, but nothing in it is read.
+function readStructure(t) {
+    let i = 0;
+    const list = (op, next) => {
+        const items = [];
+        for (;;) {
+            const node = next();
+            if (!node)
+                return undefined;
+            items.push(node);
+            if (t[i]?.tok !== op)
+                break;
+            i++;
         }
-        terms[terms.length - 1].push(t);
-    }
-    const required = [];
-    for (let term of terms) {
-        // Drop parentheses that wrap the whole term: ((STATUS = 'OPEN')).
-        while (term.length > 2 && term[0].tok === "(" && closes(term) === term.length - 1)
-            term = term.slice(1, -1);
-        const c = exactComparison(term);
-        if (c)
-            required.push(c);
-    }
-    return required;
+        return items.length === 1 ? items[0] : { op, items };
+    };
+    const or = () => list("OR", and);
+    const and = () => list("AND", unary);
+    const unary = () => {
+        if (t[i]?.tok === "NOT") {
+            i++;
+            const item = unary();
+            return item && { op: "NOT", item };
+        }
+        if (t[i]?.tok === "(") {
+            const start = i++;
+            const inner = or();
+            // A group only if the parenthesis closes a whole expression. Otherwise,
+            // as in (BEDS) > 5, it is part of a single condition.
+            if (inner && t[i]?.tok === ")" && [undefined, "AND", "OR", ")"].includes(t[i + 1]?.tok)) {
+                i++;
+                return inner;
+            }
+            i = start;
+        }
+        return condition();
+    };
+    // Tokens up to the next AND, OR or closing parenthesis at this level. The
+    // AND of BETWEEN x AND y belongs to the condition, and so do the
+    // parentheses of IN (...) and UPPER(...).
+    const condition = () => {
+        const start = i;
+        let depth = 0;
+        let between = false;
+        for (; i < t.length; i++) {
+            const tok = t[i].tok;
+            if (depth === 0) {
+                if (tok === "OR" || tok === ")")
+                    break;
+                if (tok === "AND") {
+                    if (!between)
+                        break;
+                    between = false;
+                }
+                if (tok === "BETWEEN")
+                    between = true;
+            }
+            if (tok === "(")
+                depth++;
+            if (tok === ")")
+                depth--;
+        }
+        return i > start ? { op: "condition", toks: t.slice(start, i) } : undefined;
+    };
+    const root = or();
+    return root && i === t.length ? root : undefined;
 }
-// The comparison a term is, when the term is nothing but one comparison and
-// none of AND, OR, NOT or a constant can hide inside it. Only these shapes count:
+// Records what each condition says. `negated` is true under an odd number of
+// NOTs; `required` stays true only along AND, with no OR or NOT above.
+function readConditions(node, negated, required, found, unread) {
+    if (node.op === "NOT")
+        return readConditions(node.item, !negated, false, found, unread);
+    if (node.op !== "condition") {
+        for (const item of node.items)
+            readConditions(item, negated, required && node.op === "AND", found, unread);
+        return;
+    }
+    const t = node.toks;
+    const c = exactComparison(t);
+    if (c) {
+        found.push({ ...c, negated: c.negated !== negated, required });
+        return;
+    }
+    // FIELD IS NOT NULL only says the field has a value, so it is read. FIELD
+    // IS NULL asks for rows without one and is left unread: for STATUS, adding
+    // STATUS = 'OPEN' to it could only match nothing. Under NOT the two swap.
+    const isNull = t.length === 3 && t[1].tok === "IS" && t[2].tok === "NULL";
+    const isNotNull = t.length === 4 && t[1].tok === "IS" && t[2].tok === "NOT" && t[3].tok === "NULL";
+    if (t[0].isField && (isNull || isNotNull) && isNotNull !== negated)
+        return;
+    for (const x of t)
+        if (x.isField)
+            unread.add(x.tok);
+}
+// The comparison a condition is, when it is nothing but one comparison of a
+// field with quoted values. Only these shapes count:
 //   FIELD op 'x'        'x' op FIELD        FN(FIELD) op 'x'
 //   FIELD [NOT] IN ('x', ...)               FN(FIELD) [NOT] IN ('x', ...)
-// where op is =, <> or != and FN is UPPER or LOWER.
+// where op is =, <> or != and FN is UPPER or LOWER. Anything more, such as
+// STATUS = '9'-8 (which ArcGIS reads as STATUS = '1'), is not a comparison.
+// Values must be plain ASCII: the layers match fullwidth and superscript forms
+// too (STATUS = 'ＯＰＥＮ' finds the OPEN rows), which the value check can't.
 function exactComparison(term) {
     const t = term.map((x) => x.tok);
-    const lit = (i) => i < t.length && isLiteral(t[i]);
+    const lit = (i) => i < t.length && isLiteral(t[i]) && /^[\x20-\x7e]*$/.test(t[i]);
     const opAt = (i) => (t[i] === "=" ? false : t[i] === "<>" || t[i] === "!=" ? true : undefined);
     // 'x' op FIELD
     if (t.length === 3 && lit(0) && term[2].isField && opAt(1) !== undefined) {
@@ -179,106 +237,17 @@ function exactComparison(term) {
     }
     return { field, negated, values };
 }
-// Index of the parenthesis that closes the one at index 0.
-function closes(term) {
-    let d = 0;
-    for (let i = 0; i < term.length; i++) {
-        if (term[i].tok === "(")
-            d++;
-        if (term[i].tok === ")" && --d === 0)
-            return i;
-    }
-    return -1;
-}
-// Advance the comparison scan by one token, recording a comparison when a
-// "FIELD = 'x'", "'x' = FIELD" or "FIELD IN ('x', ...)" shape completes. Each
-// field reference a shape accounts for (those, and FIELD IS [NOT] NULL) is
-// added to `read`.
-function step(scan, tok, isField, found, read) {
-    const fresh = isField
-        ? { at: "field", field: tok }
-        : FUNCTIONS.has(tok)
-            ? { at: "fn" }
-            : isLiteral(tok)
-                ? { at: "lit", value: unquote(tok) }
-                : { at: "none" };
-    switch (scan.at) {
-        case "field":
-            if (tok === "=")
-                return { at: "op", field: scan.field, negated: false };
-            if (tok === "<>" || tok === "!=")
-                return { at: "op", field: scan.field, negated: true };
-            if (tok === "NOT")
-                return { at: "not", field: scan.field };
-            if (tok === "IN")
-                return { at: "in", field: scan.field, negated: false, open: false, values: [] };
-            if (tok === "IS")
-                return { at: "is", field: scan.field, not: false };
-            return fresh;
-        case "is":
-            if (tok === "NOT" && !scan.not)
-                return { ...scan, not: true };
-            // FIELD IS NOT NULL only says the field has a value, so it is read.
-            // FIELD IS NULL asks for rows without one and is left unread: for
-            // STATUS, adding STATUS = 'OPEN' to it could only match nothing.
-            if (tok === "NULL" && scan.not)
-                read.push(scan.field);
-            return tok === "NULL" ? { at: "none" } : fresh;
-        case "not":
-            if (tok === "IN")
-                return { at: "in", field: scan.field, negated: true, open: false, values: [] };
-            return fresh;
-        case "op":
-            if (!isLiteral(tok))
-                return fresh;
-            found.push({ field: scan.field, negated: scan.negated, values: [unquote(tok)] });
-            read.push(scan.field);
-            return { at: "none" };
-        case "in":
-            if (!scan.open)
-                return tok === "(" ? { ...scan, open: true } : fresh;
-            if (isLiteral(tok))
-                return { ...scan, values: [...scan.values, unquote(tok)] };
-            if (tok === ",")
-                return scan;
-            if (tok === ")" && scan.values.length) {
-                found.push({ field: scan.field, negated: scan.negated, values: scan.values });
-                read.push(scan.field);
-            }
-            return tok === ")" ? { at: "none" } : fresh;
-        case "fn":
-            return tok === "(" ? { at: "fnOpen" } : fresh;
-        case "fnOpen":
-            return isField ? { at: "fnField", field: tok } : fresh;
-        case "fnField":
-            return tok === ")" ? { at: "field", field: scan.field } : fresh;
-        case "lit":
-            if (tok === "=")
-                return { at: "litOp", value: scan.value, negated: false };
-            if (tok === "<>" || tok === "!=")
-                return { at: "litOp", value: scan.value, negated: true };
-            return fresh;
-        case "litOp":
-            if (!isField)
-                return fresh;
-            found.push({ field: tok, negated: scan.negated, values: [scan.value] });
-            read.push(tok);
-            return { at: "none" };
-        default:
-            return fresh;
-    }
-}
 // These layers compare text without regard to letter case or trailing
 // spaces (STATUS = 'open' matches 'OPEN'), so the check does the same.
 const fold = (v) => v.trimEnd().toUpperCase();
 // Checks quoted values against fields whose full value list is known.
 // FIELD = 'x' where 'x' is not in the layer can only match nothing, and an
-// empty map reads as "nothing is there". So when every condition is joined by
-// AND (`provable`), such a filter is refused. With OR or NOT in the filter the
-// rest of it may still match rows, so the same finding is only a warning. In
-// an IN list, values that don't exist are harmless as long as one does, so
-// they are warnings too.
-export function checkValues(comparisons, schema, provable = true) {
+// empty map reads as "nothing is there". So when every matching row must meet
+// that comparison (`required`), the filter is refused. Anywhere else, such as
+// one side of an OR, the rest of the filter may still match rows, so the same
+// finding is only a warning. In an IN list, values that don't exist are
+// harmless as long as one does, so they are warnings too.
+export function checkValues(comparisons, schema) {
     const warnings = [];
     for (const c of comparisons) {
         const field = schema.find((f) => f.name === c.field);
@@ -307,7 +276,7 @@ export function checkValues(comparisons, schema, provable = true) {
                 : near === undefined
                     ? ` ${c.field} has ${field.examples.length} values in the layer and none is a near match.`
                     : "");
-        if (!provable) {
+        if (!c.required) {
             warnings.push(`${isNot}, so that part of the filter matches nothing.${hint}`);
             continue;
         }
@@ -337,24 +306,29 @@ export function checkOrderBy(raw, fields) {
 }
 // Leave out hospitals that are not marked OPEN, unless the filter itself asks
 // for another status: STATUS = 'CLOSED', STATUS IN ('OPEN', 'CLOSED'),
-// STATUS <> 'OPEN'. Merely naming the field (STATUS IS NOT NULL) does not
-// switch the rule off. Decided from the comparisons the gate parsed, not the
-// raw text, so a value like NAME LIKE '%STATUS%' can't switch it off either.
+// STATUS <> 'OPEN', NOT (STATUS = 'OPEN'). Merely naming the field
+// (STATUS IS NOT NULL) does not switch the rule off, and neither does a NOT
+// that applies to another field. Decided from the conditions the gate read,
+// not the raw text, so a value like NAME LIKE '%STATUS%' can't switch it off.
 // If the filter uses STATUS in a form the gate can't read (STATUS LIKE 'C%',
 // (STATUS) = 'CLOSED', STATUS IS NULL), adding STATUS = 'OPEN' could turn a
 // valid filter into an empty one, so the rule is left off and `note` says so.
 // "Open" means marked OPEN in the layer's snapshot, not open today.
-export function applyOpenOnly(datasetId, check) {
+//
+// `statuses` is the layer's full list of STATUS values, when known. A value
+// not in it (STATUS = 'OPN' OR STATE = 'TX') matches nothing, so it is not a
+// request for other hospitals; the value check warns about it instead.
+export function applyOpenOnly(datasetId, check, statuses) {
     if (datasetId !== "hospitals")
         return { where: check.where, applied: false };
-    const isStatus = (f) => f.toUpperCase() === "STATUS";
     const isOpen = (v) => fold(v) === "OPEN";
-    // Every matching row is already OPEN (a top-level AND STATUS = 'OPEN'),
+    const status = (check.comparisons ?? []).filter((c) => c.field.toUpperCase() === "STATUS");
+    // Every matching row is already OPEN (STATUS = 'OPEN' joined by AND only),
     // whatever else the filter says: nothing to add, and the answer says so.
-    if ((check.required ?? []).some((c) => isStatus(c.field) && !c.negated && c.values.every(isOpen))) {
+    if (status.some((c) => c.required && !c.negated && c.values.every(isOpen))) {
         return { where: check.where, applied: true };
     }
-    const unreadStatus = (check.unread ?? []).find(isStatus);
+    const unreadStatus = (check.unread ?? []).find((f) => f.toUpperCase() === "STATUS");
     if (unreadStatus) {
         return {
             where: check.where,
@@ -363,14 +337,24 @@ export function applyOpenOnly(datasetId, check) {
             note: `The filter uses ${unreadStatus} in a form this check can't read, so hospitals not marked OPEN were not left out automatically.`,
         };
     }
-    const status = (check.comparisons ?? []).filter((c) => isStatus(c.field));
-    const asksForOther = status.some((c) => (c.negated ? c.values.some(isOpen) : !c.values.every(isOpen))) ||
-        // NOT (STATUS = 'OPEN') or NOT (STATUS IS NOT NULL) asks for the others.
-        (Boolean(check.hasNot) && (check.fields ?? status.map((c) => c.field)).some(isStatus));
-    if (asksForOther)
+    const isOther = (v) => !isOpen(v) && (!statuses || statuses.some((s) => fold(s) === fold(v)));
+    if (status.some((c) => (c.negated ? c.values.some(isOpen) : c.values.some(isOther)))) {
         return { where: check.where, applied: false };
-    const where = check.where === "1=1" ? "STATUS = 'OPEN'" : `(${check.where}) AND STATUS = 'OPEN'`;
-    return { where, applied: true };
+    }
+    return { where: openOnlyWhere(check.where), applied: true };
+}
+// The filter limited to hospitals marked OPEN.
+function openOnlyWhere(where) {
+    return where === "1=1" ? "STATUS = 'OPEN'" : `(${where}) AND STATUS = 'OPEN'`;
+}
+// What to send instead when the rule was left off over an unread STATUS. The
+// suggested filter has to pass the length cap too, or following it fails.
+export function openOnlyAdvice(checked) {
+    const suggested = openOnlyWhere(checked);
+    if (suggested.length <= MAX_WHERE_LENGTH)
+        return `If only open hospitals were meant, send the filter as ${suggested}.`;
+    const room = MAX_WHERE_LENGTH - (suggested.length - checked.length);
+    return `If only open hospitals were meant, shorten the filter to ${room} characters or fewer, then send it as (filter) AND STATUS = 'OPEN'.`;
 }
 // Requested output fields must exist. Default fields are always added so a
 // result never comes back without a name and a way to reach the place.

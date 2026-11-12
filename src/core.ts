@@ -14,7 +14,7 @@ export { DATASETS, DATASET_IDS, isLevelI, isAdultLevelI } from "./datasets.js";
 export type { Dataset, DatasetId, ValueGroup } from "./datasets.js";
 export { getSchema, getLayerInfo, getDataSource, findNearby, clearSchemaCache, milesBetween, arcgisRequest, MAX_GET_URL } from "./arcgis.js";
 export type { FieldInfo, LayerInfo, NearbyQuery, NearbyResult } from "./arcgis.js";
-export { checkWhere, checkValues, checkFields, checkOrderBy, applyOpenOnly } from "./where.js";
+export { checkWhere, checkValues, checkFields, checkOrderBy, applyOpenOnly, openOnlyAdvice, MAX_WHERE_LENGTH } from "./where.js";
 export type { WhereCheck, ValueCheck, FieldCheck, OrderCheck, Comparison } from "./where.js";
 
 export type FilterCheck =
@@ -48,10 +48,15 @@ export function checkFilter(
 ): FilterCheck {
   const shape = checkWhere(raw, schema.map((f) => f.name));
   if (!shape.ok) return shape;
-  const values = checkValues(shape.comparisons, schema, !shape.hasOr && !shape.hasNot);
+  const values = checkValues(shape.comparisons, schema);
   if (!values.ok) return values;
-  const open: ReturnType<typeof applyOpenOnly> =
-    options.openOnly === false ? { where: shape.where, applied: false } : applyOpenOnly(ds.id, shape);
+  const status = schema.find((f) => f.name.toUpperCase() === "STATUS");
+  let open = applyOpenOnly(ds.id, shape, status?.all_values ? status.examples : undefined);
+  // With open_only: false nothing is added. The answer is still open-only
+  // when the filter itself says STATUS = 'OPEN', and is labelled so.
+  if (options.openOnly === false && !(open.applied && open.where === shape.where)) {
+    open = { where: shape.where, applied: false };
+  }
   const warnings = open.note ? [...values.warnings, open.note] : values.warnings;
   return {
     ok: true,

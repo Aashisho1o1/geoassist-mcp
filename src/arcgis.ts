@@ -61,8 +61,28 @@ export async function getDataSource(ds: Dataset) {
   return { ...ds.source, layer_last_edited: info.lastEdited };
 }
 
+// ArcGIS Online answers HTTP 404 once a GET URL passes about 2,000
+// characters, and URL encoding can triple a filter's length ('&' becomes
+// '%26'). Longer requests go as a POST with the same parameters in a form
+// body, which the query endpoint accepts the same way. It is still a read.
+export const MAX_GET_URL = 1800;
+
+export function arcgisRequest(url: string): { url: string; init: RequestInit } {
+  const at = url.indexOf("?");
+  if (url.length <= MAX_GET_URL || at < 0) return { url, init: {} };
+  return {
+    url: url.slice(0, at),
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: url.slice(at + 1),
+    },
+  };
+}
+
 async function getJson(url: string): Promise<any> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  const req = arcgisRequest(url);
+  const res = await fetch(req.url, { ...req.init, signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`ArcGIS returned HTTP ${res.status} for ${url.split("?")[0]}`);
   const body = await res.json();
   if (body?.error) throw new Error(`ArcGIS error: ${body.error.message ?? JSON.stringify(body.error)}`);

@@ -238,7 +238,9 @@ view.on("click", async (event) => {
 // ---------- hazards ----------
 
 // Only the newest request may update the list: a slow answer for a tab the
-// person has already left must not overwrite the tab they are on.
+// person has already left must not overwrite the tab they are on. Returns
+// null when a newer request took over, true when events were listed, and
+// false when there were none or EONET could not be reached.
 let hazardToken = 0;
 
 async function loadHazards(category, { autoselect = false } = {}) {
@@ -250,17 +252,18 @@ async function loadHazards(category, { autoselect = false } = {}) {
   try {
     hazards = await listHazards(category, 30);
   } catch (e) {
-    if (token !== hazardToken) return false;
+    if (token !== hazardToken) return null;
     state.hazards = [];
     $("hazardList").innerHTML = `<li class="empty">Couldn't reach NASA EONET (${esc(e.message)}). You can still click the map.</li>`;
     drawHazards();
     return false;
   }
-  if (token !== hazardToken) return false;
+  if (token !== hazardToken) return null;
   state.hazards = hazards;
   renderHazardList();
   drawHazards();
-  if (autoselect && state.hazards.length) {
+  // Don't move the map if the person already picked a point while this loaded.
+  if (autoselect && state.hazards.length && !state.center) {
     // Open on the newest real event rather than a planned prescribed burn.
     selectHazard(state.hazards.find((h) => !/prescribed/i.test(h.title)) ?? state.hazards[0]);
     return true;
@@ -628,8 +631,11 @@ async function renderLevelICard(ds, schema) {
 // ---------- start ----------
 
 renderPresets();
-const ok = (await loadHazards("wildfires", { autoselect: true })) || (await loadHazards("severeStorms", { autoselect: true }));
-if (!ok) {
+// Start on wildfires, then storms if there are none. Stop as soon as the
+// person picks a tab or a point themselves (a superseded load returns null).
+let ok = await loadHazards("wildfires", { autoselect: true });
+if (ok === false && !state.center) ok = await loadHazards("severeStorms", { autoselect: true });
+if (ok === false && !state.center) {
   state.center = { latitude: 34.0522, longitude: -118.2437, label: "Los Angeles (sample point)" };
   setStatus("No open US wildfires or storms right now, so here's a sample point in Los Angeles.");
   run({ zoom: true });

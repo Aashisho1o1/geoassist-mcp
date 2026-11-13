@@ -149,7 +149,7 @@ npm run inspect
 - Values are checked only for the coded fields listed above, and only in `=` and `IN` comparisons (including `'x' = FIELD` and `UPPER(FIELD) = 'x'`). `LIKE` patterns, ranges, `BETWEEN`, negated values (`<>`, `NOT IN`, or under `NOT`), numbers, and other text fields (for example `CITY = 'Springfeld'`) are not checked, so a misspelled value there still returns nothing without an explanation.
 - The gate checks words and characters, not grammar. `BEDS > 1 AND AND STATE = 'CA'` passes the gate and is rejected by ArcGIS with its own error.
 - A polygon event is reduced to the average of its corner points, which is wrong for a shape that crosses the date line. EONET returned only points for the open events I checked.
-- The value check ignores letter case and trailing spaces, because that is how these layers compare text (`STATUS = 'open'` matches `OPEN`). A layer that compares text exactly would need a stricter check.
+- The value check ignores letter case, trailing spaces and character width, because that is how these layers compare text (`STATUS = 'open'` and fullwidth `STATUS = 'ＯＰＥＮ'` both match `OPEN`). Accents are not ignored, by the layers or the check (`STATE = 'ÇA'` is refused). A layer that compares text exactly would need a stricter check.
 
 ## Tests
 

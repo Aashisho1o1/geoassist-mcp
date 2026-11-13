@@ -228,11 +228,9 @@ function readConditions(node: Node, negated: boolean, required: boolean, found: 
 //   FIELD [NOT] IN ('x', ...)               FN(FIELD) [NOT] IN ('x', ...)
 // where op is =, <> or != and FN is UPPER or LOWER. Anything more, such as
 // STATUS = '9'-8 (which ArcGIS reads as STATUS = '1'), is not a comparison.
-// Values must be plain ASCII: the layers match fullwidth and superscript forms
-// too (STATUS = 'ＯＰＥＮ' finds the OPEN rows), which the value check can't.
 function exactComparison(term: Tok[]): Omit<Comparison, "required"> | undefined {
   const t = term.map((x) => x.tok);
-  const lit = (i: number) => i < t.length && isLiteral(t[i]) && /^[\x20-\x7e]*$/.test(t[i]);
+  const lit = (i: number) => i < t.length && isLiteral(t[i]);
   const opAt = (i: number) => (t[i] === "=" ? false : t[i] === "<>" || t[i] === "!=" ? true : undefined);
   // 'x' op FIELD
   if (t.length === 3 && lit(0) && term[2].isField && opAt(1) !== undefined) {
@@ -280,7 +278,10 @@ export type ValueCheck =
 
 // These layers compare text without regard to letter case or trailing
 // spaces (STATUS = 'open' matches 'OPEN'), so the check does the same.
-const fold = (v: string) => v.trimEnd().toUpperCase();
+// They also ignore character width: STATUS = 'ＯＰＥＮ' (fullwidth) and
+// STATUS = '²' (superscript) match 'OPEN' and '2'. NFKC folds those forms;
+// accents are kept, as the layers keep them ('ÇA' matches nothing).
+const fold = (v: string) => v.normalize("NFKC").trimEnd().toUpperCase();
 
 // Checks quoted values against fields whose full value list is known.
 // FIELD = 'x' where 'x' is not in the layer can only match nothing, and an

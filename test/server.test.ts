@@ -203,8 +203,6 @@ test("only a whole condition counts as a comparison", () => {
   const r = checkWhere("(NAME) = 'A' AND ((STATUS = 'OPEN'))", f);
   assert.ok(r.ok);
   assert.deepEqual(r.ok && [r.comparisons, r.unread], [[{ field: "STATUS", negated: false, values: ["OPEN"], required: true }], ["NAME"]]);
-  // Values the value check can't compare (fullwidth, superscript) are not read.
-  assert.deepEqual(checkWhere("STATUS = 'ＯＰＥＮ'", f).ok && (checkWhere("STATUS = 'ＯＰＥＮ'", f) as { unread: string[] }).unread, ["STATUS"]);
   // When the tokens don't form a structure at all, nothing is read.
   const broken = checkWhere("NAME = 'A' AND", f);
   assert.deepEqual(broken.ok && [broken.comparisons, broken.unread], [[], ["NAME"]]);
@@ -239,6 +237,9 @@ test("open-only rule is decided by what the filter asks of STATUS, not by text",
   assert.equal(withKnown("STATUS = 'OPN' OR NAME = 'A'").where, "(STATUS = 'OPN' OR NAME = 'A') AND STATUS = 'OPEN'");
   assert.equal(withKnown("STATUS IN ('OPEN', 'OPENED')").applied, true);
   assert.equal(withKnown("STATUS = 'closed ' OR NAME = 'A'").applied, false);
+  // Fullwidth OPEN is OPEN to the layer: asking for anything else turns the rule off.
+  assert.equal(withKnown("STATUS <> 'ＯＰＥＮ'").applied, false);
+  assert.deepEqual(withKnown("STATUS = 'ＯＰＥＮ'"), { where: "STATUS = 'ＯＰＥＮ'", applied: true });
 });
 
 test("open-only rule stays off, with a note, when STATUS is used in a form the gate can't read", () => {
@@ -703,8 +704,11 @@ test("an unknown value is refused only where every matching row needs it", () =>
   assert.deepEqual(valuesOf("NOT (STATUS = 'OPENED')"), { ok: true, warnings: [] });
   // Not a whole comparison: not checked. ArcGIS reads this as STATUS = '1'.
   assert.deepEqual(valuesOf("STATUS = 'OPENED'-8"), { ok: true, warnings: [] });
-  // The layers match fullwidth forms of real values (STATUS = 'ＯＰＥＮ' finds 7,216 live).
+  // The layers ignore character width (STATUS = 'ＯＰＥＮ' finds the 7,216 OPEN
+  // rows live) but not accents ('ÇA' finds nothing).
   assert.deepEqual(valuesOf("STATUS = 'ＯＰＥＮ'"), { ok: true, warnings: [] });
+  assert.deepEqual(valuesOf("STATE IN ('ＣＡ', 'C²')"), { ok: true, warnings: ["'C²' is not a value of STATE in this layer and matched nothing. The other values in the list were used."] });
+  assert.match(errorOf("STATE = 'ÇA'"), /'ÇA' is not a value of STATE/);
 });
 
 test("an empty string is a value like any other", () => {

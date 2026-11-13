@@ -3,7 +3,7 @@
 // the radius search, and the EONET handling are the exact code an AI client
 // reaches through MCP. Only the map and the page are new.
 
-import { DATASETS, getSchema, findNearby, getDataSource, checkFilter, checkFields, MAX_GET_URL } from "./lib/core.js";
+import { DATASETS, getSchema, findNearby, getDataSource, checkFilter, checkFields, MAX_GET_URL, openOnlyAdvice } from "./lib/core.js";
 import { listHazards, inUS } from "./lib/eonet.js";
 
 const [EsriMap, MapView, Basemap, TileLayer, GraphicsLayer, Graphic, Circle, Point] = await new Promise((resolve) =>
@@ -497,7 +497,7 @@ function renderResults(ds, result, gate, raw, where, filteredOpen, source) {
   const what = ds.id === "hospitals" ? (n === 1 ? "hospital" : "hospitals") : n === 1 ? "school" : "schools";
   // A value the layer doesn't have is the likeliest reason for a short or
   // empty list, so say it next to the result, not only in the details below.
-  const advice = gate.statusUnread ? [`If you meant only open hospitals, write (${gate.checked}) AND STATUS = 'OPEN'.`] : [];
+  const advice = gate.statusUnread ? [openOnlyAdvice(gate.checked)] : [];
   const warnings = [...gate.warnings, ...advice];
   const warned = warnings.length ? `<br /><span class="small"><strong>Check the filter:</strong> ${warnings.map(esc).join(" ")}</span>` : "";
   if (n === 0) {

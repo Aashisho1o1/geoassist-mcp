@@ -146,12 +146,9 @@ test("where gate", () => {
     ok: true,
     where: "BEDS > 100 AND STATE IN ('CA','NV')",
     fields: ["BEDS", "STATE"],
-    comparisons: [{ field: "STATE", negated: false, values: ["CA", "NV"] }],
-    hasOr: false,
-    hasNot: false,
+    comparisons: [{ field: "STATE", negated: false, values: ["CA", "NV"], required: true }],
     // BEDS > 100 is a range, not a recorded comparison.
     unread: ["BEDS"],
-    required: [{ field: "STATE", negated: false, values: ["CA", "NV"] }],
   });
   assert.equal(checkWhere("", f).ok, true);
   assert.equal(checkWhere("NAME = 'x'; DROP TABLE t", f).ok, false);
@@ -173,19 +170,44 @@ test("where gate", () => {
   assert.equal(checkWhere(`NAME IN (${Array(120).fill("'ABCDEFGH'").join(",")})`, f).ok, false);
 });
 
-test("the gate notes OR and a negating NOT, but not NOT IN or IS NOT NULL", () => {
-  const f = ["NAME", "STATE", "BEDS"];
-  const flags = (w: string) => {
+test("a NOT applies to its own condition, and NOT IN, NOT LIKE, NOT BETWEEN and IS NOT NULL are not a NOT", () => {
+  const f = ["NAME", "STATE", "BEDS", "HELIPAD", "STATUS"];
+  // field:value, ! when negated, * when every matching row must meet it.
+  const read = (w: string) => comparisonsOf(w, f).map((c) => `${c.negated ? "!" : ""}${c.field}:${c.values.join("|")}${c.required ? "*" : ""}`);
+  assert.deepEqual(read("STATE = 'CA' AND BEDS > 1"), ["STATE:CA*"]);
+  assert.deepEqual(read("STATE = 'CA' OR NAME = 'X'"), ["STATE:CA", "NAME:X"]);
+  assert.deepEqual(read("NOT (STATE = 'CA')"), ["!STATE:CA"]);
+  assert.deepEqual(read("NOT STATE = 'CA' AND NAME = 'X'"), ["!STATE:CA", "NAME:X*"]);
+  assert.deepEqual(read("NOT HELIPAD = 'Y' AND STATUS = 'OPEN'"), ["!HELIPAD:Y", "STATUS:OPEN*"]);
+  assert.deepEqual(read("NOT (NOT STATE = 'CA')"), ["STATE:CA"]);
+  assert.deepEqual(read("NOT (STATE <> 'CA' OR NAME NOT IN ('X'))"), ["STATE:CA", "NAME:X"]);
+  assert.deepEqual(read("STATE NOT IN ('CA') AND NAME IS NOT NULL AND NAME NOT LIKE 'A%' AND BEDS NOT BETWEEN 1 AND 2 AND HELIPAD = 'Y'"), ["!STATE:CA*", "HELIPAD:Y*"]);
+  assert.deepEqual(read("NAME = 'this OR that, NOT both'"), ["NAME:this OR that, NOT both*"]);
+  // Nested ANDs are still required; anything below an OR is not.
+  assert.deepEqual(read("(BEDS > 1 AND (STATE = 'CA')) AND NAME = 'X'"), ["STATE:CA*", "NAME:X*"]);
+  assert.deepEqual(read("(STATE = 'CA' OR BEDS > 1) AND NAME = 'X'"), ["STATE:CA", "NAME:X*"]);
+});
+
+test("only a whole condition counts as a comparison", () => {
+  const f = ["NAME", "STATUS", "BEDS"];
+  // ArcGIS reads STATUS = '9'-8 as STATUS = '1' (99,534 schools live), so
+  // reading it as STATUS = '9' would wrongly call the filter empty.
+  for (const w of ["STATUS = '9'-8", "STATUS = '9' -8", "STATUS IN ('9'-8)", "STATUS = 'OPEN' = 'X'", "(STATUS) = 'X'", "STATUS = STATUS"]) {
     const r = checkWhere(w, f);
     assert.ok(r.ok, w);
-    return r.ok ? [r.hasOr, r.hasNot] : [];
-  };
-  assert.deepEqual(flags("STATE = 'CA' AND BEDS > 1"), [false, false]);
-  assert.deepEqual(flags("STATE = 'CA' OR BEDS > 1"), [true, false]);
-  assert.deepEqual(flags("NOT (STATE = 'CA')"), [false, true]);
-  assert.deepEqual(flags("NOT STATE = 'CA'"), [false, true]);
-  assert.deepEqual(flags("STATE NOT IN ('CA') AND NAME IS NOT NULL AND NAME NOT LIKE 'A%' AND BEDS NOT BETWEEN 1 AND 2"), [false, false]);
-  assert.deepEqual(flags("NAME = 'this OR that, NOT both'"), [false, false]);
+    assert.deepEqual(r.comparisons, [], w);
+    assert.deepEqual(r.unread, ["STATUS"], w);
+  }
+  // A parenthesis around an operand is part of its condition; the rest of
+  // the filter is still read.
+  const r = checkWhere("(NAME) = 'A' AND ((STATUS = 'OPEN'))", f);
+  assert.ok(r.ok);
+  assert.deepEqual(r.ok && [r.comparisons, r.unread], [[{ field: "STATUS", negated: false, values: ["OPEN"], required: true }], ["NAME"]]);
+  // Values the value check can't compare (fullwidth, superscript) are not read.
+  assert.deepEqual(checkWhere("STATUS = 'ＯＰＥＮ'", f).ok && (checkWhere("STATUS = 'ＯＰＥＮ'", f) as { unread: string[] }).unread, ["STATUS"]);
+  // When the tokens don't form a structure at all, nothing is read.
+  const broken = checkWhere("NAME = 'A' AND", f);
+  assert.deepEqual(broken.ok && [broken.comparisons, broken.unread], [[], ["NAME"]]);
 });
 
 test("open-only rule is decided by what the filter asks of STATUS, not by text", () => {
@@ -211,10 +233,16 @@ test("open-only rule is decided by what the filter asks of STATUS, not by text",
   // Already limited to OPEN: nothing is added, and the answer still says so.
   assert.deepEqual(open("BEDS > 5 AND status = 'open'"), { where: "BEDS > 5 AND STATUS = 'open'", applied: true });
   assert.equal(applyOpenOnly("schools", { where: "1=1" }).applied, false);
+  // A status the layer doesn't have is a typo, not a request for others.
+  const known = ["OPEN", "CLOSED"];
+  const withKnown = (w: string) => applyOpenOnly("hospitals", checkWhere(w, f) as Extract<ReturnType<typeof checkWhere>, { ok: true }>, known);
+  assert.equal(withKnown("STATUS = 'OPN' OR NAME = 'A'").where, "(STATUS = 'OPN' OR NAME = 'A') AND STATUS = 'OPEN'");
+  assert.equal(withKnown("STATUS IN ('OPEN', 'OPENED')").applied, true);
+  assert.equal(withKnown("STATUS = 'closed ' OR NAME = 'A'").applied, false);
 });
 
 test("open-only rule stays off, with a note, when STATUS is used in a form the gate can't read", () => {
-  const f = ["NAME", "STATUS", "BEDS"];
+  const f = ["NAME", "STATUS", "BEDS", "HELIPAD"];
   const open = (w: string) => {
     const r = checkWhere(w, f);
     assert.ok(r.ok, w);
@@ -242,9 +270,20 @@ test("open-only rule stays off, with a note, when STATUS is used in a form the g
   // STATUS IS NULL asks for rows without a status: STATUS = 'OPEN' would empty it.
   assert.equal(open("STATUS IS NULL").applied, false);
   assert.equal(open("STATUS IS NULL").statusUnread, true);
-  // STATUS IS NOT NULL is read and keeps the rule on; negated, it asks for the others.
+  // STATUS IS NOT NULL is read and keeps the rule on. Under NOT the two swap.
   assert.equal(open("STATUS IS NOT NULL").where, "(STATUS IS NOT NULL) AND STATUS = 'OPEN'");
-  assert.deepEqual(open("NOT (STATUS IS NOT NULL)"), { where: "NOT (STATUS IS NOT NULL)", applied: false });
+  assert.equal(open("NOT (STATUS IS NOT NULL)").statusUnread, true);
+  assert.equal(open("NOT STATUS IS NULL").where, "(NOT STATUS IS NULL) AND STATUS = 'OPEN'");
+  // A NOT on another field leaves the rule on. Live, NOT HELIPAD = 'Y' AND
+  // STATUS IS NOT NULL matches 260 closed hospitals that used to come back
+  // with no note.
+  assert.deepEqual(open("NOT HELIPAD = 'Y' AND STATUS IS NOT NULL"), {
+    where: "(NOT HELIPAD = 'Y' AND STATUS IS NOT NULL) AND STATUS = 'OPEN'",
+    applied: true,
+  });
+  assert.equal(open("NOT (NAME = 'X' OR BEDS > 5) AND STATUS <> 'CLOSED'").applied, true);
+  assert.equal(open("NOT (NOT STATUS = 'CLOSED')").applied, false);
+  assert.equal(open("NOT (STATUS <> 'OPEN')").applied, true);
   // A top-level AND STATUS = 'OPEN' already limits every row, whatever else is
   // there. This is also the form the advice asks for, so following it settles it.
   for (const w of [
@@ -256,8 +295,14 @@ test("open-only rule stays off, with a note, when STATUS is used in a form the g
   ]) {
     assert.deepEqual(open(w), { where: checkWhere(w, f).ok ? (checkWhere(w, f) as { where: string }).where : "", applied: true }, w);
   }
-  // Hidden inside a wrapped term: the rule is still added.
+  // A parenthesised operand elsewhere does not hide a required STATUS = 'OPEN',
+  // so following the advice for (STATUS) = 'CLOSED' settles the question.
+  assert.deepEqual(open("(BEDS) > 5 AND STATUS = 'OPEN'"), { where: "(BEDS) > 5 AND STATUS = 'OPEN'", applied: true });
+  assert.equal(open("((STATUS) = 'CLOSED') AND STATUS = 'OPEN'").applied, true);
+  // Hidden below an OR: the rule is still added.
   assert.equal(open("(1 = 1 OR STATUS = 'OPEN')").where, "((1 = 1 OR STATUS = 'OPEN')) AND STATUS = 'OPEN'");
+  // Inside a group joined by AND only, it is required.
+  assert.deepEqual(open("(BEDS > 1 AND STATUS = 'OPEN')"), { where: "(BEDS > 1 AND STATUS = 'OPEN')", applied: true });
   assert.equal(open("(1 = 1 AND NOT STATUS = 'OPEN')").applied, false);
   // Not at the top level, or under NOT: not required, so the usual rules apply.
   assert.equal(open("STATUS LIKE 'C%' OR NAME = 'X' AND STATUS = 'OPEN'").applied, false);
@@ -285,12 +330,12 @@ test("unread lists fields the comparison scan could not account for", () => {
   assert.deepEqual(unread("NAME IS NULL"), ["NAME"]);
 });
 
-test("required lists the comparisons that are whole top-level AND terms", () => {
+test("required marks the comparisons every matching row must meet", () => {
   const f = ["NAME", "STATUS", "BEDS"];
   const req = (w: string) => {
     const r = checkWhere(w, f);
     assert.ok(r.ok, w);
-    return r.ok ? r.required.map((c) => `${c.negated ? "!" : ""}${c.field}:${c.values.join("|")}`) : [];
+    return r.ok ? r.comparisons.filter((c) => c.required).map((c) => `${c.negated ? "!" : ""}${c.field}:${c.values.join("|")}`) : [];
   };
   assert.deepEqual(req("STATUS = 'OPEN'"), ["STATUS:OPEN"]);
   assert.deepEqual(req("BEDS > 1 AND (STATUS IN ('OPEN')) AND NAME <> 'X'"), ["STATUS:OPEN", "!NAME:X"]);
@@ -300,7 +345,7 @@ test("required lists the comparisons that are whole top-level AND terms", () => 
   assert.deepEqual(req("(STATUS = 'OPEN' OR BEDS > 1) AND NAME = 'X'"), ["NAME:X"]);
   assert.deepEqual(req("NOT STATUS = 'OPEN' AND NOT (NAME = 'X')"), []);
   assert.deepEqual(req("(STATUS) = 'OPEN' AND STATUS = NAME"), []);
-  // An OR, NOT, AND or constant hidden inside a wrapped term: not required.
+  // Below an OR or a NOT, or not a whole condition: not required.
   // (1 = 1 OR STATUS = 'OPEN') matches 354 closed hospitals live, and
   // (1 = 1 AND NOT STATUS = 'OPEN') matches only closed ones.
   for (const w of [
@@ -310,12 +355,12 @@ test("required lists the comparisons that are whole top-level AND terms", () => 
     "(NULL IS NULL OR STATUS = 'OPEN')",
     "(1 = 1 AND NOT STATUS = 'OPEN')",
     "(1 = 1 AND NOT (STATUS = 'OPEN'))",
-    "(BEDS > 1 AND STATUS = 'OPEN')",
     "STATUS = 'OPEN' = 'X'",
   ]) {
     assert.equal(req(w).filter((r) => r.startsWith("STATUS")).length, 0, w);
   }
   assert.deepEqual(req("STATUS NOT IN ('CLOSED') AND 'X' <> NAME"), ["!STATUS:CLOSED", "!NAME:X"]);
+  assert.deepEqual(req("(BEDS > 1 AND STATUS = 'OPEN')"), ["STATUS:OPEN"]);
 });
 
 test("polygon events use the average of the outer ring", () => {
@@ -576,20 +621,20 @@ const comparisonsOf = (where: string, fields: string[]) => {
 test("the gate records which quoted values each field is compared with", () => {
   const f = ["NAME", "STATUS", "TRAUMA", "BEDS"];
   assert.deepEqual(comparisonsOf("status = 'OPEN' and trauma not in ('I', 'O''NEIL')", f), [
-    { field: "STATUS", negated: false, values: ["OPEN"] },
-    { field: "TRAUMA", negated: true, values: ["I", "O'NEIL"] },
+    { field: "STATUS", negated: false, values: ["OPEN"], required: true },
+    { field: "TRAUMA", negated: true, values: ["I", "O'NEIL"], required: true },
   ]);
-  assert.deepEqual(comparisonsOf("STATUS <> 'CLOSED'", f), [{ field: "STATUS", negated: true, values: ["CLOSED"] }]);
+  assert.deepEqual(comparisonsOf("STATUS <> 'CLOSED'", f), [{ field: "STATUS", negated: true, values: ["CLOSED"], required: true }]);
   // Patterns and numbers are not value comparisons.
   assert.deepEqual(comparisonsOf("NAME LIKE '%MERCY%' AND BEDS = 100 AND BEDS BETWEEN 1 AND 2", f), []);
   // The value first, and the field inside UPPER() or LOWER(), are the same comparison.
   assert.deepEqual(comparisonsOf("'OPEN' = STATUS AND 'I' <> trauma", f), [
-    { field: "STATUS", negated: false, values: ["OPEN"] },
-    { field: "TRAUMA", negated: true, values: ["I"] },
+    { field: "STATUS", negated: false, values: ["OPEN"], required: true },
+    { field: "TRAUMA", negated: true, values: ["I"], required: true },
   ]);
   assert.deepEqual(comparisonsOf("UPPER(status) = 'OPEN' AND LOWER(TRAUMA) IN ('i')", f), [
-    { field: "STATUS", negated: false, values: ["OPEN"] },
-    { field: "TRAUMA", negated: false, values: ["i"] },
+    { field: "STATUS", negated: false, values: ["OPEN"], required: true },
+    { field: "TRAUMA", negated: false, values: ["i"], required: true },
   ]);
   assert.deepEqual(comparisonsOf("NAME = 'A' AND STATUS = 'OPEN'", f).length, 2);
 });
@@ -607,7 +652,7 @@ const SCHEMA_FIELDS = SCHEMA.map((f) => f.name);
 const valuesOf = (where: string) => {
   const r = checkWhere(where, SCHEMA_FIELDS);
   assert.ok(r.ok, where);
-  return checkValues(r.ok ? r.comparisons : [], SCHEMA, r.ok && !r.hasOr && !r.hasNot);
+  return checkValues(r.ok ? r.comparisons : [], SCHEMA);
 };
 const errorOf = (where: string) => (valuesOf(where) as { error: string }).error;
 const warningsOf = (where: string) => (valuesOf(where) as { warnings: string[] }).warnings;
@@ -641,17 +686,25 @@ test("value check leaves alone what it cannot judge", () => {
   assert.equal(valuesOf("TRAUMA LIKE 'LEVEL ONE%'").ok, true); // patterns are not checked
 });
 
-test("with OR or NOT in the filter, an unknown value is a warning, not a refusal", () => {
-  // Refusing is only right when the whole filter is provably empty.
-  assert.equal(valuesOf("STATUS = 'OPENED' AND NAME = 'A'").ok, false);
-  assert.equal(valuesOf("(STATUS = 'OPENED') AND (NAME = 'A')").ok, false);
-  for (const w of ["STATUS = 'OPENED' OR NAME = 'A'", "NOT (STATUS = 'OPENED')", "NOT STATUS = 'OPENED'", "NAME = 'A' OR TRAUMA IN ('NOPE')"]) {
+test("an unknown value is refused only where every matching row needs it", () => {
+  // Joined by AND only, at any depth: the filter can only match nothing.
+  for (const w of ["STATUS = 'OPENED' AND NAME = 'A'", "(STATUS = 'OPENED') AND (NAME = 'A')", "STATE = 'ZZ' AND NOT NAME = 'A'", "(NAME) = 'A' AND STATE = 'ZZ'", "(NAME = 'A' AND STATE = 'ZZ') AND (NAME = 'B' OR NAME = 'C')"]) {
+    assert.equal(valuesOf(w).ok, false, w);
+  }
+  // Below an OR the rest may still match rows: a warning.
+  for (const w of ["STATUS = 'OPENED' OR NAME = 'A'", "NAME = 'A' OR TRAUMA IN ('NOPE')", "(STATUS = 'OPENED' OR NAME = 'A') AND NAME = 'B'"]) {
     const r = valuesOf(w);
     assert.equal(r.ok, true, w);
     assert.equal(warningsOf(w).length, 1, w);
     assert.match(warningsOf(w)[0], /so that part of the filter matches nothing/);
   }
   assert.match(warningsOf("STATUS = 'OPENED' OR NAME = 'A'")[0], /Did you mean 'OPEN'\?/);
+  // Under NOT it excludes nothing, like STATUS <> 'OPENED': left alone.
+  assert.deepEqual(valuesOf("NOT (STATUS = 'OPENED')"), { ok: true, warnings: [] });
+  // Not a whole comparison: not checked. ArcGIS reads this as STATUS = '1'.
+  assert.deepEqual(valuesOf("STATUS = 'OPENED'-8"), { ok: true, warnings: [] });
+  // The layers match fullwidth forms of real values (STATUS = 'ＯＰＥＮ' finds 7,216 live).
+  assert.deepEqual(valuesOf("STATUS = 'ＯＰＥＮ'"), { ok: true, warnings: [] });
 });
 
 test("an empty string is a value like any other", () => {
@@ -773,6 +826,48 @@ test("find_nearby with an unreadable STATUS use says so and gives the form that 
   assert.ok(out.notes.includes("If only open hospitals were meant, send the filter as (STATUS LIKE 'C%') AND STATUS = 'OPEN'."));
   assert.ok(!out.notes.some((n: string) => /^Limited to hospitals marked OPEN/.test(n)));
   assert.ok(calls.length > 0);
+});
+
+test("the advice for an unreadable STATUS use always fits the length cap", async () => {
+  globalThis.fetch = codedFetch().fn;
+  const client = await connect();
+  const call = async (where: string) =>
+    body(await client.callTool({ name: "find_nearby", arguments: { dataset: "hospitals", latitude: 34, longitude: -117, where } }));
+  // 990 characters: adding the 22 characters of the advice would pass 1,000.
+  const start = "STATUS LIKE 'C%' OR BEDS > ";
+  const where = start + "1".repeat(990 - start.length);
+  assert.equal(where.length, 990);
+  const out = await call(where);
+  const advice = out.notes.find((n: string) => n.startsWith("If only open hospitals were meant"));
+  assert.match(advice, /shorten the filter to \d+ characters or fewer, then send it as \(filter\) AND STATUS = 'OPEN'/);
+  const room = Number(advice.match(/to (\d+) characters/)[1]);
+  assert.equal(`(${"x".repeat(room)}) AND STATUS = 'OPEN'`.length, 1000);
+  // A short filter gets the exact filter to send, and that filter passes.
+  const short = await call("STATUS LIKE 'C%'");
+  assert.ok(short.notes.includes("If only open hospitals were meant, send the filter as (STATUS LIKE 'C%') AND STATUS = 'OPEN'."));
+});
+
+test("the open-only note says how to include closed hospitals in a way that works", async () => {
+  globalThis.fetch = codedFetch().fn;
+  const client = await connect();
+  const call = async (args: Record<string, unknown>) =>
+    body(await client.callTool({ name: "find_nearby", arguments: { dataset: "hospitals", latitude: 34, longitude: -117, ...args } }));
+  // A message on every assert.ok: without one, a failing regex check here hangs the test runner.
+  const has = (notes: string[], re: RegExp) => assert.ok(notes.some((n) => re.test(n)), `${re} in ${JSON.stringify(notes)}`);
+  const lacks = (notes: string[], re: RegExp) => assert.ok(!notes.some((n) => re.test(n)), `no ${re} in ${JSON.stringify(notes)}`);
+  const added = await call({ where: "BEDS > 1" });
+  has(added.notes, /STATUS = 'OPEN' was added\). To include closed hospitals, set open_only: false/);
+  // The filter itself says OPEN: open_only: false would change nothing.
+  const own = await call({ where: "BEDS > 1 AND STATUS = 'OPEN'" });
+  assert.equal(own.query_sent.where, "BEDS > 1 AND STATUS = 'OPEN'");
+  has(own.notes, /because the filter itself says STATUS = 'OPEN'. To include closed hospitals, change that part/);
+  lacks(own.notes, /open_only: false/);
+  // With open_only: false that filter is still open-only, and labelled so.
+  const off = await call({ where: "BEDS > 1 AND STATUS = 'OPEN'", open_only: false });
+  has(off.notes, /because the filter itself says STATUS = 'OPEN'/);
+  const none = await call({ where: "BEDS > 1", open_only: false });
+  assert.equal(none.query_sent.where, "BEDS > 1");
+  lacks(none.notes, /^Limited to hospitals marked OPEN/);
 });
 
 test("schema names the Level I spellings as a value group", async () => {

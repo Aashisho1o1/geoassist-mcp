@@ -3,8 +3,7 @@ import { z } from "zod";
 import { DATASETS, DATASET_IDS } from "./datasets.js";
 import { getSchema, findNearby, getDataSource } from "./arcgis.js";
 import { listHazards, getHazard, inUS, HAZARD_CATEGORIES } from "./eonet.js";
-import { checkFields } from "./where.js";
-import { checkFilter } from "./core.js";
+import { checkFields, checkFilter, openOnlyAdvice, MAX_WHERE_LENGTH } from "./core.js";
 
 const MAX_RADIUS = 100;
 const MAX_LIMIT = 25;
@@ -85,7 +84,7 @@ export function buildServer(): McpServer {
         "with an optional where filter (for example HELIPAD = 'Y'). Coded fields such as TRAUMA are spelled many ways " +
         "('LEVEL I', 'I', 'LEVEL 1', 'PEDIATRIC LEVEL I', ...): get_dataset_schema lists every value, so filter with " +
         "IN (...) over all the spellings that match, not a single LIKE pattern. Where the schema gives a value_groups entry " +
-        "(for example LEVEL_I on TRAUMA), use its values. A value that does not exist in a coded field is refused when it is written as FIELD = 'x' or FIELD IN (...) and the filter has no OR or NOT; otherwise it comes back as a warning in notes. " +
+        "(for example LEVEL_I on TRAUMA), use its values. A value that does not exist in a coded field is refused when it is written as FIELD = 'x' or FIELD IN (...) and joined to the rest of the filter by AND only; below an OR it comes back as a warning in notes, and after <>, NOT IN or NOT it is not checked. " +
         "Returns the exact query sent to ArcGIS so the person can see what was asked. " +
         "total_in_radius is the number of matches inside the radius asked for; results is only the closest few. " +
         "data_source says who hosts the layer and when it was last edited: tell the person if it is old.",
@@ -95,7 +94,7 @@ export function buildServer(): McpServer {
         latitude: z.number().min(-90).max(90).optional(),
         longitude: z.number().min(-180).max(180).optional(),
         radius_miles: z.number().positive().max(MAX_RADIUS).default(25),
-        where: z.string().max(1000).optional().describe("Optional SQL-style filter using only fields from get_dataset_schema."),
+        where: z.string().max(MAX_WHERE_LENGTH).optional().describe("Optional SQL-style filter using only fields from get_dataset_schema."),
         open_only: z.boolean().default(true).describe("Hospitals only. If true (default), leaves out hospitals not marked OPEN in the layer's snapshot, unless the where filter itself asks for another STATUS value (for example STATUS = 'CLOSED') or uses STATUS in a form the check can't read (STATUS LIKE 'C%', STATUS IS NULL), which the answer's notes say. Set false to include every status. Has no effect on schools or cities."),
         out_fields: z.array(z.string().max(64)).max(30).optional().describe("Extra fields to return. Name and contact fields are always included."),
         limit: z.number().int().min(1).max(MAX_LIMIT).default(10),
@@ -125,12 +124,10 @@ export function buildServer(): McpServer {
         if (!filter.ok) return fail(`${filter.error} Call get_dataset_schema to see the valid fields and values.`);
         const fields = checkFields(args.out_fields, names, ds.contactFields);
         if (!fields.ok) return fail(fields.error);
-        const effectiveWhere = filter.where;
-        const filteredOpen = filter.openOnlyApplied;
 
-        // 4. Run it.
+        // 3. Run it.
         const result = await findNearby(ds, {
-          where: effectiveWhere,
+          where: filter.where,
           outFields: fields.list,
           latitude: center.latitude,
           longitude: center.longitude,
@@ -153,11 +150,13 @@ export function buildServer(): McpServer {
               : "This layer does not report when it was last edited, so its age is unknown.",
             "Distances are straight-line miles, not driving distance.",
             ...filter.warnings,
-            ...(filter.statusUnread
-              ? [`If only open hospitals were meant, send the filter as (${filter.checked}) AND STATUS = 'OPEN'.`]
-              : []),
-            ...(filteredOpen
-              ? ["Limited to hospitals marked OPEN in this snapshot (STATUS = 'OPEN'). To include closed hospitals, set open_only: false or filter on STATUS = 'CLOSED'."]
+            ...(filter.statusUnread ? [openOnlyAdvice(filter.checked)] : []),
+            ...(filter.openOnlyApplied
+              ? [
+                  filter.where === filter.checked
+                    ? "Limited to hospitals marked OPEN in this snapshot, because the filter itself says STATUS = 'OPEN'. To include closed hospitals, change that part of the filter."
+                    : "Limited to hospitals marked OPEN in this snapshot (STATUS = 'OPEN' was added). To include closed hospitals, set open_only: false or filter on STATUS = 'CLOSED'.",
+                ]
               : []),
             ...(result.effective_radius_miles < args.radius_miles && result.closest_guaranteed
               ? [`This area is dense, so the search used a ${result.effective_radius_miles}-mile circle: small enough to fetch every place inside it, which guarantees these are the closest ones.`]
